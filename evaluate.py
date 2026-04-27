@@ -50,20 +50,14 @@ def _build_true_cls(inst_map_np, nc_map_np):
         cls_dict[int(iid)] = int(np.bincount(labels.astype(np.int64)).argmax())
     return cls_dict
 
-def _per_class_pq(pred_inst_list, true_inst_list,
-                  pred_cls_list,true_cls_list,
+def _per_class_pq(pred_inst_list, true_inst_list,pred_cls_list, true_cls_list,
                   num_classes, match_iou=0.5):
-    """
-    对每个类别单独抠出实例图，计算 per-class PQ。
-    返回 dict: {class_name: {'PQ':, 'DQ':, 'SQ':}}
-    """
     results = {}
     for cls_id in range(num_classes):
         pqs, dqs, sqs = [], [], []
-        for pred_inst, true_inst, pred_cls, true_cls in zip(pred_inst_list, true_inst_list,
-                pred_cls_list,  true_cls_list):
+        for pred_inst, true_inst, pred_cls, true_cls in zip(
+                pred_inst_list, true_inst_list, pred_cls_list, true_cls_list):
 
-            # 只保留属于 cls_id 的实例
             def _filter(inst_map, cls_dict):
                 out = np.zeros_like(inst_map)
                 for iid, cid in cls_dict.items():
@@ -74,12 +68,17 @@ def _per_class_pq(pred_inst_list, true_inst_list,
             p = _filter(pred_inst, pred_cls)
             t = _filter(true_inst, true_cls)
             r = get_fast_pq(t, p, match_iou=match_iou)
-            pqs.append(r['PQ']); dqs.append(r['DQ']); sqs.append(r['SQ'])
+
+            # ── Bug2 修复：NaN（两边都空）跳过，不计入均值 ──────
+            if not np.isnan(r['PQ']):
+                pqs.append(r['PQ'])
+                dqs.append(r['DQ'])
+                sqs.append(r['SQ'])
 
         results[CLASS_NAMES[cls_id]] = {
-            'PQ': float(np.mean(pqs)),
-            'DQ': float(np.mean(dqs)),
-            'SQ': float(np.mean(sqs)),
+            'PQ': float(np.mean(pqs)) if pqs else 0.0,
+            'DQ': float(np.mean(dqs)) if dqs else 0.0,
+            'SQ': float(np.mean(sqs)) if sqs else 0.0,
         }
     return results
 
