@@ -15,14 +15,14 @@ def get_args():
     p.add_argument('--data_root',default='/home/lwy/dataset/PanNuke/processed')
     p.add_argument('--val_fold',    default='Fold2')
     p.add_argument('--epochs',      type=int,   default=100)
-    p.add_argument('--batch_size',  type=int,   default=8)
+    p.add_argument('--batch_size',  type=int,   default=32)
     p.add_argument('--lr',          type=float, default=1e-4)
     p.add_argument('--img_size',    type=int,   default=640)
     p.add_argument('--base_ch',     type=int,   default=64)
     p.add_argument('--num_classes', type=int,   default=5)   # ← 新增
     p.add_argument('--save_dir',    default='./runs')
     p.add_argument('--resume',      default='')
-    p.add_argument('--num_workers', type=int,   default=4)
+    p.add_argument('--num_workers', type=int,   default=8)
     return p.parse_args()
 
 def _to_device(hover_gts, device):
