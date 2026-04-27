@@ -1,0 +1,15 @@
+# 忽略训练生成的运行文件
+runs/
+# 忽略所有模型权重文件
+*.pt
+*.onnx
+*.engine
+# 忽略Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+# 忽略编辑器/系统缓存
+.vscode/
+.idea/
+.DS_Store
