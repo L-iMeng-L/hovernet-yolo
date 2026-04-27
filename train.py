@@ -64,14 +64,14 @@ def _to_device(hover_gts, device):
     return out
 
 # ── train ─────────────────────────────────────────────────────
-def train_one_epoch(model, loader, optimizer, device):
+def train_one_epoch(model, loader, optimizer, device, epoch):  # 加epoch参数
     model.train()
     total = dict(loss=0., loss_np=0., loss_hv=0., loss_nc=0., np_iou=0.)
     n = len(loader)
 
     pbar = tqdm(loader, desc='Train', leave=False,
                 bar_format='{l_bar}{bar:20}{r_bar}')
-    for imgs, bboxes, labels, hover_gts in pbar:
+    for i, (imgs, bboxes, labels, hover_gts) in enumerate(pbar):# 加enumerate
         imgs      = imgs.to(device)
         hover_gts = _to_device(hover_gts, device)
 
@@ -97,6 +97,14 @@ def train_one_epoch(model, loader, optimizer, device):
             nc  =f"{details['loss_nc']:.4f}",
             iou =f"{np_iou:.4f}",
         )
+
+        # ── 每个epoch只在第0个batch打印一次诊断 ──
+        if i == 0 and epoch % 5 == 0:
+            with torch.no_grad():
+                fg      = (hover_gts['hv_map'].abs() > 0.01)
+                pred_fg = out['hv_map'][fg].abs().mean().item()
+                gt_fg   = hover_gts['hv_map'][fg].abs().mean().item()
+            print(f"\n[HV诊断 epoch={epoch}] 前景 pred={pred_fg:.4f}gt={gt_fg:.4f}")
 
     return {k: v / n for k, v in total.items()}
 
@@ -187,7 +195,7 @@ def main():
         logger.info(f"[Resume] epoch={start_epoch}best_val_loss={best_val_loss:.4f}")
 
     for epoch in range(start_epoch, args.epochs):
-        tr = train_one_epoch(model, train_loader, optimizer, device)
+        tr = train_one_epoch(model, train_loader, optimizer, device, epoch)
         vl = val_one_epoch(model, val_loader, device)
         scheduler.step()
 

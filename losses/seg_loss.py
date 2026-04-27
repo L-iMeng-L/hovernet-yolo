@@ -22,8 +22,8 @@ def seg_loss(model_out, hover_gt, w_np=1.0, w_hv=2.0, w_nc=1.0):
     fg_count= fg_mask.sum().clamp(min=1)
     bg_count  = (1 - fg_mask).sum().clamp(min=1)
 
-    #前景像素权重=2，背景权重=0.1（惩罚但不忽略）
-    weight= fg_mask * 2.0 + (1 - fg_mask) * 0.1
+    #前景像素权重=2，背景权重=0.01（惩罚但不忽略）
+    weight= fg_mask * 2.0 + (1 - fg_mask) * 0.01
     loss_hv  = (sq_err * weight).sum() / (weight.sum() + 1e-7)
 
     # ── nc loss（CrossEntropy，ignore_index=-1）───────────────
