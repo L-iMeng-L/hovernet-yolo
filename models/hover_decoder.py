@@ -2,93 +2,124 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.backbone import CBL
 
-class DenseUnit(nn.Module):
-    def __init__(self, in_ch, grow_ch):
+class FPNFusion(nn.Module):
+    def __init__(self, c2=256, c3=512, c4=512, out_ch=256):  
         super().__init__()
-        self.conv = nn.Sequential(
-            CBL(in_ch, grow_ch, 1, 1, 0),
-            CBL(grow_ch, grow_ch, 3, 1, 1),
+        self.c2_conv = nn.Conv2d(c2, out_ch, 1)
+        self.c3_conv = nn.Conv2d(c3, out_ch, 1)
+        self.c4_conv = nn.Conv2d(c4, out_ch, 1)
+        
+        self.refine = nn.Sequential(
+            CBL(out_ch * 3, out_ch, 3, 1, 1),
+            CBL(out_ch, out_ch, 3, 1, 1),
         )
+    
+    def forward(self, x2, x3, x4):
+        c2_aligned = self.c2_conv(x2)
+        c3_aligned = F.interpolate(
+            self.c3_conv(x3), size=x2.shape[2:], 
+            mode='bilinear', align_corners=False
+        )
+        c4_aligned = F.interpolate(
+            self.c4_conv(x4), size=x2.shape[2:], 
+            mode='bilinear', align_corners=False
+        )
+        fused = torch.cat([c2_aligned, c3_aligned, c4_aligned], dim=1)
+        return self.refine(fused)
 
-    def forward(self, x):
-        return torch.cat([x, self.conv(x)], dim=1)
-
-class UpBlock(nn.Module):
-    def __init__(self, in_ch, skip_ch, out_ch):
+# ── ASPP 模块 ─────────────────────────────────────────────
+class ASPP(nn.Module):
+    def __init__(self, in_ch, out_ch):
         super().__init__()
-        fused_ch = in_ch + skip_ch
-        self.dense = DenseUnit(fused_ch, out_ch)
-        self.compress = CBL(fused_ch + out_ch, out_ch, 1, 1, 0)
+        self.conv1 = CBL(in_ch, out_ch, 1, 1, 0)
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=6, dilation=6),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU(),
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=12, dilation=12),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU(),
+        )
+        self.pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_ch, out_ch, 1),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU(),
+        )
+        self.fuse = CBL(out_ch * 4, out_ch, 1, 1, 0)
+    
+    def forward(self, x):
+        size = x.shape[2:]
+        feat1 = self.conv1(x)
+        feat2 = self.conv2(x)
+        feat3 = self.conv3(x)
+        feat4 = F.interpolate(self.pool(x), size=size, mode='bilinear', align_corners=False)
+        return self.fuse(torch.cat([feat1, feat2, feat3, feat4], dim=1))
 
-    def forward(self, x, skip):
-        x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
-        x = torch.cat([x, skip], dim=1)
-        return self.compress(self.dense(x))
+# ── 增强解码头 ────────────────────────────────────────────
+class EnhancedHead(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.aspp = ASPP(in_ch, in_ch // 2)
+        self.refine = nn.Sequential(
+            CBL(in_ch // 2, in_ch // 2, 3, 1, 1),
+            CBL(in_ch // 2, in_ch // 2, 3, 1, 1),
+        )
+        self.out_conv = nn.Conv2d(in_ch // 2, out_ch, 1)
+    
+    def forward(self, x):
+        x = self.aspp(x)
+        x = self.refine(x)
+        return self.out_conv(x)
 
+# ── 增强解码器 ────────────────────────────────────────────
 class HoverDecoder(nn.Module):
-    """
-    三分支输出：
-      np_map : (B, 1,H, W)  前景概率
-      hv_map : (B, 2,           H, W)  水平/垂直距离图
-      nc_map : (B, num_classes, H, W)  像素级类别 logits（未经 softmax）
-    """
     def __init__(self, base_ch=64, num_classes=5):
         super().__init__()
         b = base_ch
-
-        self.bottleneck = CBL(b * 16, b * 4, 1, 1, 0)# 1024 → 256
-        self.up1 = UpBlock(b * 4, b * 8, b * 4)        # 256+512 → 256
-        self.up2 = UpBlock(b * 4, b * 4, b * 2)        # 256+256 → 128
-
-        # NP / HV 共享到这一级
-        self.up3_np = UpBlock(b * 2, b * 2, b)# 128+128 → 64，NP专用
-        self.up3_hv = UpBlock(b * 2, b * 2, b)          # 128+128 → 64，HV专用
-        self.up3_nc = UpBlock(b * 2, b * 2, b)          # 128+128 → 64，NC专用
-
-        # NP head
+        
+        # 多尺度融合
+        self.fpn = FPNFusion(c2=b*4, c3=b*8, c4=b*16, out_ch=b*4)
+        
+        # 三个增强解码头
         self.np_head = nn.Sequential(
-            CBL(b, b, 3, 1, 1),
-            nn.Conv2d(b, 1, 1),
-            nn.Sigmoid(),
+            EnhancedHead(b*4, 64),
+            nn.Conv2d(64, 1, 1),
+            nn.Sigmoid()
         )
-        # HV head
+        
         self.hv_head = nn.Sequential(
-            CBL(b, b, 3, 1, 1),
-            nn.Conv2d(b, 2, 1),
-            nn.Tanh(),
+            EnhancedHead(b*4, 64),
+            nn.Conv2d(64, 2, 1),
+            nn.Tanh()
         )
-        # NC head（输出 logits，loss里用 CrossEntropy）
+        
         self.nc_head = nn.Sequential(
-            CBL(b, b, 3, 1, 1),
-            nn.Conv2d(b, num_classes, 1),   # 不加Softmax，训练时 CE内部处理
+            EnhancedHead(b*4, 128),
+            nn.Conv2d(128, num_classes, 1)
         )
-
+    
     def forward(self, backbone_feats):
-        x2, x3, x4 = backbone_feats          # /8-256, /16-512, /32-1024
-
-        d = self.bottleneck(x4)              # (B, 256, H/32, W/32)
-        d = self.up1(d, x3)                  # (B, 256, H/16, W/16)
-        d2 = self.up2(d, x2)                 # (B, 128, H/8,  W/8)
-
-        # 三个分支独立精炼（共享 d2，各自有独立 up3）
-        # up3 的 skip 用d2 自身（相同分辨率做一次自精炼）
-        d_np = self.up3_np(d2, d2)           # (B, 64, H/8, W/8)
-        d_hv = self.up3_hv(d2, d2)
-        d_nc = self.up3_nc(d2, d2)
-
-        #×8 上采样到原图
+        x2, x3, x4 = backbone_feats  # /8-256, /16-512, /32-1024
+        
+        # 多尺度融合
+        fused = self.fpn(x2, x3, x4)  # (B, 256, H/8, W/8)
+        
+        # 三个分支解码
         np_map = F.interpolate(
-            self.np_head(d_np), scale_factor=8, mode='bilinear', align_corners=False
-        )   # (B, 1, H, W)
-
+            self.np_head(fused), scale_factor=8, 
+            mode='bilinear', align_corners=False
+        )
         hv_map = F.interpolate(
-            self.hv_head(d_hv), scale_factor=8, mode='bilinear', align_corners=False
-        )   # (B, 2, H, W)
-
+            self.hv_head(fused), scale_factor=8, 
+            mode='bilinear', align_corners=False
+        )
         nc_map = F.interpolate(
-            self.nc_head(d_nc), scale_factor=8, mode='bilinear', align_corners=False
-        )   # (B, num_classes, H, W)  logits
-
-        return d2, np_map, hv_map, nc_map
+            self.nc_head(fused), scale_factor=8, 
+            mode='bilinear', align_corners=False
+        )
+        
+        return fused, np_map, hv_map, nc_map

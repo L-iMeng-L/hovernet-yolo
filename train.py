@@ -191,22 +191,18 @@ def main():
         base_ch=args.base_ch,
         num_classes=args.num_classes,
     ).to(device)
-
-    hv_params    = [p for n, p in model.named_parameters() if 'hv' in n]
-    nc_params    = [p for n, p in model.named_parameters() if 'nc' in n]
-    other_params = [p for n, p in model.named_parameters()
-                if 'hv' not in n and 'nc' not in n]
+    backbone_params = [p for n, p in model.named_parameters() if 'backbone' in n]
+    decoder_params  = [p for n, p in model.named_parameters() if 'decoder' in n]
 
     optimizer = optim.AdamW([
-        {'params': other_params, 'lr': args.lr,        'weight_decay': 1e-4},
-        {'params': hv_params,    'lr': args.lr * 3.0,  'weight_decay': 1e-5},  # HV头 3× lr
-        {'params': nc_params,    'lr': args.lr,         'weight_decay': 1e-4},
+        {'params': backbone_params, 'lr': args.lr * 0.1,  'weight_decay': 1e-4},
+        {'params': decoder_params,  'lr': args.lr,        'weight_decay': 1e-4},
     ])
+
     def _warmup_cosine(epoch):
-        warmup_epochs = 5
+        warmup_epochs = 10
         if epoch < warmup_epochs:
-            return (epoch + 1) / warmup_epochs          # 线性warmup
-    # cosine decay
+            return (epoch + 1) / warmup_epochs
         progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
         return 0.5 * (1 + np.cos(np.pi * progress))
 
