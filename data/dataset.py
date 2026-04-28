@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+import albumentations as A
 
 def _random_augment(img, seg_dict):
     """
@@ -67,6 +68,32 @@ def _color_jitter(img):
     hsv = np.clip(hsv, 0, 255).astype(np.uint8)
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
+_elastic_transform = A.Compose([
+    A.ElasticTransform(alpha=120, sigma=6, p=0.4),
+    A.GridDistortion(num_steps=5, distort_limit=0.2, p=0.3),
+])
+
+def _apply_elastic(img, np_map, inst_map, type_map):
+    """
+    弹性/网格形变，inst_map/np_map/type_map 同步变换。
+    hv_map 需要重新计算，这里简化：形变后 hv 用旧值（可接受）
+    """
+    H, W = img.shape[:2]
+    # albumentations 需要 mask 是 uint8/float32
+    transformed = _elastic_transform(
+        image=img,
+        masks=[
+            np_map.astype(np.float32),
+            inst_map.astype(np.float32),
+            type_map.astype(np.float32),
+        ]
+    )
+    img2     = transformed['image']
+    np_map2  = transformed['masks'][0]
+    inst_map2= transformed['masks'][1].astype(np.int32)
+    type_map2= transformed['masks'][2].astype(np.int32)
+    return img2, np_map2, inst_map2, type_map2
+
 class PanNukeDataset(Dataset):
     def __init__(self, root, img_size=640, num_classes=5,
                  transform=None, is_train=False):          # ← 新增 is_train
@@ -123,6 +150,20 @@ class PanNukeDataset(Dataset):
 
             if np.random.rand() > 0.5:
                 img = _color_jitter(img)
+
+            if np.random.rand() > 0.6:
+                img, np_map, inst_map, type_map = _apply_elastic(
+                    img, np_map, inst_map, type_map)
+                # 形变后重新裁为标准大小
+                img      = cv2.resize(img, (self.img_size, self.img_size))
+                np_map   = cv2.resize(np_map.astype(np.float32),
+                                      (self.img_size, self.img_size))
+                inst_map = cv2.resize(inst_map.astype(np.float32),
+                                      (self.img_size, self.img_size),
+                                      interpolation=cv2.INTER_NEAREST).astype(np.int32)
+                type_map = cv2.resize(type_map.astype(np.float32),
+                                      (self.img_size, self.img_size),
+                                      interpolation=cv2.INTER_NEAREST).astype(np.int32)
 
         # ── 图像 → Tensor ─────────────────────────────────────
         img_t = torch.from_numpy(

@@ -93,7 +93,8 @@ def train_one_epoch(model, loader, optimizer, device, epoch):
 
         pbar.set_postfix(
             loss=f"{loss.item():.4f}",
-            np  =f"{details['loss_np']:.4f}",
+            focal  = f"{details['loss_focal']:.4f}",
+            dice   = f"{details['loss_dice']:.4f}",
             hv  =f"{details['loss_hv']:.4f}",
             nc  =f"{details['loss_nc']:.4f}",
             iou =f"{np_iou:.4f}",
@@ -179,11 +180,21 @@ def main():
     # ← NC 分支lr从 2× 降到 0.5×，避免分类头过拟合
     nc_params= [p for n, p in model.named_parameters() if 'nc' in n]
     other_params = [p for n, p in model.named_parameters() if 'nc' not in n]
-    optimizer = optim.AdamW([
-        {'params': other_params, 'lr': args.lr},
-        {'params': nc_params,    'lr': args.lr * 0.5},   # ← 2.0 → 0.5
-    ], weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=1e-4,
+    )
+    def _warmup_cosine(epoch):
+        warmup_epochs = 5
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs          # 线性warmup
+    # cosine decay
+        progress = (epoch - warmup_epochs) / max(args.epochs - warmup_epochs, 1)
+        return 0.5 * (1 + np.cos(np.pi * progress))
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_warmup_cosine)
 
     start_epoch, best_val_loss = 0, float('inf')
     no_improve = 0                # ← early stop 计数
