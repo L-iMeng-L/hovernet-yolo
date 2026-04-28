@@ -20,21 +20,20 @@ PANNUKE_CLASSES = {
 }
 NUM_CLASSES = 5
 
-#──────────────────────────────────────────────────────────────
 def build_combined_maps(masks_i):
     """
-    masks_i : (256, 256, 6)最后一个通道是背景，忽略
+    masks_i : (256, 256, 6) 前5通道=各类实例图，第6通道=背景(忽略)
     返回:
         combined_inst : (H, W) int32  全局唯一实例ID，背景=0
-        type_map      : (H, W) int32  0=背景, 1~5=类别(1-indexed)
+        type_map      : (H, W) int32  0=背景, 1~5=类别
     """
     H, W = masks_i.shape[:2]
     combined_inst = np.zeros((H, W), dtype=np.int32)
     type_map      = np.zeros((H, W), dtype=np.int32)
     offset = 0
 
-    for cls_id in range(NUM_CLASSES):          # 0~4
-        ch = masks_i[:, :, cls_id].astype(np.int32)   # 实例ID图，0=背景
+    for cls_id in range(NUM_CLASSES):  # 0~4
+        ch = masks_i[:, :, cls_id].astype(np.int32)
         inst_ids = np.unique(ch)
         inst_ids = inst_ids[inst_ids != 0]
         if len(inst_ids) == 0:
@@ -44,7 +43,9 @@ def build_combined_maps(masks_i):
             mask = ch == inst_id
             new_id = inst_id + offset
             combined_inst[mask] = new_id
-            type_map[mask]= cls_id + 1   # 1-indexed，0保留给背景offset += int(ch.max())                # 保证不同通道ID不冲突
+            type_map[mask] = cls_id + 1  # 1-indexed
+
+        offset += int(ch.max())  # ← 这行必须在循环内！
 
     return combined_inst, type_map
 

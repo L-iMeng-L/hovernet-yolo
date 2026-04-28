@@ -1,5 +1,4 @@
-# train.py 完整修正版
-
+# train.py 
 import os
 import logging
 import argparse
@@ -36,7 +35,7 @@ def get_args():
     p = argparse.ArgumentParser()
     p.add_argument('--data_root',default='/home/lwy/dataset/PanNuke/processed')
     p.add_argument('--val_fold',    default='Fold3')
-    p.add_argument('--epochs',      type=int,   default=80)
+    p.add_argument('--epochs',      type=int,   default=150)
     p.add_argument('--batch_size',  type=int,   default=32)
     p.add_argument('--lr',          type=float, default=1e-4)
     p.add_argument('--img_size',    type=int,   default=640)

@@ -97,7 +97,9 @@ def predict_visual(model, loader, device, args):
         pred_insts, pred_cls_list = batch_postprocess(
             out['np_map'], out['hv_map'], out['nc_map'],
             np_thresh    = args.np_thresh,
-            energy_thresh= args.energy_thresh,
+            min_area     = args.min_area,
+            min_distance = args.min_distance,
+            peak_thresh  = args.peak_thresh
         )
 
         # GT 实例图
@@ -186,7 +188,9 @@ def get_args():
     p.add_argument('--num_classes',   type=int,   default=5)
     p.add_argument('--num_workers',   type=int,   default=2)
     p.add_argument('--np_thresh',     type=float, default=0.5)
-    p.add_argument('--energy_thresh', type=float, default=0.4)
+    p.add_argument('--peak_thresh',   type=float, default=0.2)
+    p.add_argument('--min_area',      type=int,   default=10)
+    p.add_argument('--min_distance',  type=int,   default=10)   
     return p.parse_args()
 
 def main():

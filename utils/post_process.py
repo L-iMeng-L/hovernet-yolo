@@ -4,12 +4,9 @@ import numpy as np
 from scipy.ndimage import measurements
 from skimage.segmentation import watershed
 from skimage.morphology import remove_small_objects
+from skimage.morphology import remove_small_holes  
 
-# utils/post_process.py
-
-from skimage.morphology import remove_small_holes  # 添加导入
-
-def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=8, peak_thresh=0.4):
+def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=3, peak_thresh=0.3):
     """
     实例分割（可调参数版本）
     
@@ -53,7 +50,7 @@ def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=8,
     # 4. 分水岭
     inst_map = watershed(-energy, markers, mask=np_binary)
     
-    # 5. 移除小对象（修复警告）
+    # 5. 移除小对象
     inst_map = remove_small_holes(
         remove_small_holes(inst_map.astype(bool), area_threshold=min_area),
         area_threshold=min_area
@@ -68,9 +65,9 @@ def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=8,
     
     return inst_map
 
-def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6, energy_thresh=0.4, 
+def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6, 
                       min_area=30, min_distance=8, peak_thresh=0.4):
-    """批量后处理（可调参数）"""
+    """批量后处理"""
     B = np_maps.shape[0]
     np_maps = np_maps.cpu().numpy()[:, 0]
     hv_maps = hv_maps.cpu().numpy()
