@@ -71,5 +71,5 @@ if __name__ == '__main__':
     # 使用示例：
     # python plot_curves.py \
     #   --log_dir ./runs/Fold1_Fold2_vs_Fold3 \
-    #   --savetraining_curves.png
+    #   --save training_curves.png
     main()

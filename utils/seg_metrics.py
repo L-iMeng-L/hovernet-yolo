@@ -97,5 +97,5 @@ def batch_seg_metrics(pred_inst_list, true_inst_list,
             accum[k].append(res[k])
 
     # nanmean：跳过空图的NaN，只统计有实例的图
-    return {k: float(np.nanmean(v)) if any(~np.isnan(v) for v in [accum[k]])
-            else 0.0 for k, v in accum.items()}
+    return {k: float(np.nanmean(v)) if not np.all(np.isnan(v))
+        else 0.0 for k, v in accum.items()}

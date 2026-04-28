@@ -55,7 +55,7 @@ for i in "${!VAL_FOLDS[@]}"; do
         [[ "$f" != "$VAL" ]] && TRAIN_FOLDS+=("$f")
     done
     TRAIN_STR=$(IFS='_'; echo "${TRAIN_FOLDS[*]}")
-    CKPT="${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}/best.pt"
+    CKPT="${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}/best.pth"
 
     if [[ ! -f "${CKPT}" ]]; then
         echo "[ERROR] checkpoint not found: ${CKPT}"

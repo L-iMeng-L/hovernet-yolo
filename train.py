@@ -218,10 +218,10 @@ def main():
             f"[{epoch:03d}] lr={lr_now:.2e} "
             f"train={train_metrics['loss']:.4f} val={val_loss:.4f} "
             f"nc_tr={train_metrics['loss_nc']:.4f} nc_val={val_metrics['loss_nc']:.4f} "
-            f"{'★BEST' if is_best else f'no_improve={no_improve}/{args.patience}'}"
+            f"{'BEST' if is_best else f'no_improve={no_improve}/{args.patience}'}"
         )
 
-        csv_log.write({
+        csv_log.log({
             'epoch': epoch,
             'lr'           : lr_now,
             'train_loss'   : train_metrics['loss'],
