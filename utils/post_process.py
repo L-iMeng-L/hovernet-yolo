@@ -1,121 +1,152 @@
 # utils/post_process.py
-import numpy as np
 import cv2
-from scipy.ndimage import label as scipy_label
+import numpy as np
+from scipy.ndimage import measurements
+from skimage.segmentation import watershed
+from skimage.morphology import remove_small_objects
 
-try:
-    from skimage.segmentation import watershed
-except ImportError:
-    def watershed(energy, markers=None, mask=None):
-        energy_img = np.uint8(
-            (energy - energy.min()) / (energy.max() - energy.min() + 1e-7) * 255
-        )
-        image = cv2.cvtColor(energy_img, cv2.COLOR_GRAY2BGR)
-        markers = markers.astype(np.int32) if markers is not None else None
-        if mask is not None:
-            markers = markers.copy()
-            markers[~mask] = 0
-        labels = cv2.watershed(image, markers)
-        labels[labels == -1] = 0
-        return labels
-
-def _sobel_energy(hv_map):
+def process_instance(np_map, hv_map, min_area=10):
     """
-    hv_map: (H, W, 2)
-    改动：ksize 21→7，减少边界模糊；加高斯平滑抑制噪声
+    使用 NP + HV 生成实例分割图
+    
+    Args:
+        np_map: (H, W) 核概率图
+        hv_map: (2, H, W) 水平/垂直距离图
+        min_area: 最小核面积
+    
+    Returns:
+        inst_map: (H, W) 实例ID图，0为背景
     """
-    def _norm_sobel(m):
-        m_blur = cv2.GaussianBlur(m.astype(np.float32), (5, 5), 0)
-        sx = cv2.Sobel(m_blur, cv2.CV_64F, 1, 0, ksize=7)   # ← 21→7
-        sy = cv2.Sobel(m_blur, cv2.CV_64F, 0, 1, ksize=7)
-        mag = np.sqrt(sx**2 + sy**2)
-        mag = (mag - mag.min()) / (mag.max() - mag.min() + 1e-7)
-        return mag
-
-    energy = _norm_sobel(hv_map[..., 0]) + _norm_sobel(hv_map[..., 1])
-    energy = (energy - energy.min()) / (energy.max() - energy.min() + 1e-7)
-    return energy
-
-def _remove_small_instances(inst_map, min_pixels=30):
-    """
-    过滤面积过小的实例（假阳性噪声）
-    min_pixels: 低于此面积的实例置为背景
-    """
-    counts = np.bincount(inst_map.ravel())   # index=inst_id
-    for iid, cnt in enumerate(counts):
-        if iid == 0:
-            continue
-        if cnt < min_pixels:
-            inst_map[inst_map == iid] = 0
+    # 1. 二值化NP
+    np_binary = (np_map > 0.5).astype(np.uint8)
+    
+    # 2. 计算能量图（距离到质心的负值）
+    h_dir = hv_map[0]
+    v_dir = hv_map[1]
+    energy = np.sqrt(h_dir**2 + v_dir**2)
+    energy = 1.0 - energy  # 质心处能量最高
+    
+    # 3. 找种子点（局部极大值）
+    from skimage.feature import peak_local_max
+    from skimage.morphology import dilation, disk
+    
+    # 平滑能量图
+    energy_smooth = cv2.GaussianBlur(energy, (5, 5), 0)
+    
+    # 找局部极大值作为种子
+    coordinates = peak_local_max(
+        energy_smooth,
+        min_distance=5,
+        threshold_abs=0.3,
+        exclude_border=False
+    )
+    
+    # 生成marker
+    markers = np.zeros_like(np_binary, dtype=np.int32)
+    for idx, (y, x) in enumerate(coordinates, start=1):
+        if np_binary[y, x] > 0:  # 只在前景区域
+            markers[y, x] = idx
+    
+    # 膨胀marker避免过分割
+    markers = dilation(markers, disk(2))
+    
+    # 4. 分水岭分割
+    inst_map = watershed(-energy, markers, mask=np_binary)
+    
+    # 5. 移除小对象
+    inst_map = remove_small_objects(inst_map, min_size=min_area)
+    
+    # 重新编号
+    inst_map = measurements.label(inst_map > 0)[0]
+    
     return inst_map
 
-def hover_postprocess(np_map, hv_map, nc_map=None,
-                      np_thresh=0.5, energy_thresh=0.4,
-                      min_pixels=30):
+def classify_instances(inst_map, nc_map):
     """
-    改动：
-      1. Sobel ksize 21→7，加高斯预平滑
-      2. 自适应 energy_thresh（Otsu in 前景区）
-      3. 过滤小实例（min_pixels）
+    对每个实例进行分类投票
+    
+    Args:
+        inst_map: (H, W) 实例ID图
+        nc_map: (num_classes, H, W) 分类概率图
+    
+    Returns:
+        inst_type_map: (H, W) 每个像素的实例类别
+        inst_info: dict, 每个实例的详细信息
     """
-    fg     = (np_map > np_thresh).astype(np.uint8)
-    energy = _sobel_energy(hv_map)
+    num_classes = nc_map.shape[0]
+    inst_ids = np.unique(inst_map)
+    inst_ids = inst_ids[inst_ids > 0]  # 排除背景
+    
+    inst_type_map = np.zeros_like(inst_map, dtype=np.int32)
+    inst_info = {}
+    
+    for inst_id in inst_ids:
+        # 获取该实例的mask
+        inst_mask = (inst_map == inst_id)
+        
+        # 提取该实例内所有像素的分类概率
+        inst_probs = nc_map[:, inst_mask]  # (num_classes, N_pixels)
+        
+        # 方法1: 平均投票（推荐）
+        avg_prob = inst_probs.mean(axis=1)  # (num_classes,)
+        pred_type = np.argmax(avg_prob)
+        
+        # 方法2: 多数投票（备选）
+        # pixel_types = np.argmax(inst_probs, axis=0)
+        # pred_type = np.bincount(pixel_types).argmax()
+        
+        # 填充类别
+        inst_type_map[inst_mask] = pred_type
+        
+        # 保存实例信息
+        inst_info[int(inst_id)] = {
+            'type': int(pred_type),
+            'type_prob': avg_prob.tolist(),
+            'centroid': measurements.center_of_mass(inst_mask),
+            'area': int(inst_mask.sum()),
+            'bbox': get_bbox(inst_mask)
+        }
+    
+    return inst_type_map, inst_info
 
-    # ── 自适应阈值：Otsu 在前景区内计算 ─────────────────────
-    if fg.sum() > 100:
-        fg_energy = (energy[fg > 0] * 255).astype(np.uint8)
-        otsu_val, _ = cv2.threshold(
-            fg_energy, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        adaptive_thresh = float(otsu_val) / 255.0
-        # 限制在合理范围内，避免极端值
-        energy_thresh = float(np.clip(adaptive_thresh, 0.25, 0.60))
+def get_bbox(mask):
+    """计算mask的边界框"""
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any() or not cols.any():
+        return [0, 0, 0, 0]
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    return [int(cmin), int(rmin), int(cmax), int(rmax)]
 
-    marker_bin = ((energy < energy_thresh) & (fg > 0)).astype(np.uint8)
-    markers, _ = scipy_label(marker_bin)
-    inst_map   = watershed(energy, markers=markers, mask=fg.astype(bool))
-    inst_map   = inst_map.astype(np.int32)
-
-    # ── 去除小实例 ────────────────────────────────────────────
-    inst_map = _remove_small_instances(inst_map, min_pixels=min_pixels)
-
-    # ── 类别投票 ──────────────────────────────────────────────
-    inst_class = {}
-    if nc_map is not None:
-        for iid in np.unique(inst_map):
-            if iid == 0:
-                continue
-            mask = inst_map == iid
-            cls_votes = nc_map[mask].sum(axis=0)
-            inst_class[int(iid)] = int(cls_votes.argmax())
-
-    return inst_map, inst_class
-
-def batch_postprocess(np_maps, hv_maps, nc_maps=None,
-                      np_thresh=0.5, energy_thresh=0.4,
-                      min_pixels=30):
-    import torch
-    if hasattr(np_maps, 'cpu'):
-        np_maps_np = np_maps.squeeze(1).cpu().numpy()
-        hv_maps_np = hv_maps.permute(0, 2, 3, 1).cpu().numpy()
-        if nc_maps is not None:
-            import torch.nn.functional as F
-            nc_prob    = F.softmax(nc_maps, dim=1)
-            nc_maps_np = nc_prob.permute(0, 2, 3, 1).cpu().numpy()
-        else:
-            nc_maps_np = [None] * np_maps_np.shape[0]
-    else:
-        np_maps_np = np_maps.squeeze(1)
-        hv_maps_np = hv_maps
-        nc_maps_np = nc_maps if nc_maps is not None else [None] * len(np_maps_np)
-
-    inst_maps, inst_classes = [], []
-    for i in range(len(np_maps_np)):
-        nc = nc_maps_np[i] if nc_maps_np is not None else None
-        inst, cls_dict = hover_postprocess(
-            np_maps_np[i], hv_maps_np[i], nc,
-            np_thresh, energy_thresh, min_pixels,
-        )
-        inst_maps.append(inst)
-        inst_classes.append(cls_dict)
-
-    return inst_maps, inst_classes
+def post_process_hovernet(outputs, min_area=10):
+    """
+    完整的HoverNet后处理
+    
+    Args:
+        outputs: dict, 包含 'np_map', 'hv_map', 'nc_map'
+        min_area: 最小核面积
+    
+    Returns:
+        results: dict, 包含实例分割和分类结果
+    """
+    np_map = outputs['np_map'].squeeze().cpu().numpy()  # (H, W)
+    hv_map = outputs['hv_map'].squeeze().cpu().numpy()  # (2, H, W)
+    nc_map = outputs['nc_map'].squeeze().cpu().numpy()  # (C, H, W)
+    
+    # Softmax归一化分类概率
+    nc_map = np.exp(nc_map) / np.exp(nc_map).sum(axis=0, keepdims=True)
+    
+    # 1. 实例分割
+    inst_map = process_instance(np_map, hv_map, min_area)
+    
+    # 2. 实例分类
+    inst_type_map, inst_info = classify_instances(inst_map, nc_map)
+    
+    return {
+        'inst_map': inst_map,
+        'inst_type_map': inst_type_map,
+        'inst_info': inst_info,
+        'np_map': np_map,
+        'hv_map': hv_map
+    }

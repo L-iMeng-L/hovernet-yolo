@@ -3,6 +3,7 @@ import os
 import logging
 import argparse
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 import numpy as np
@@ -11,6 +12,7 @@ from losses.seg_loss import seg_loss
 from data.dataset import get_dataloader
 from utils.metrics import compute_np_iou
 from utils.logger import CSVLogger
+from utils.post_process import post_process_hovernet
 
 # ── 日志 ──────────────────────────────────────────────────────
 def setup_logger(save_dir):
@@ -67,93 +69,143 @@ def _to_device(hover_gts, device):
 # ── train ─────────────────────────────────────────────────────
 def train_one_epoch(model, loader, optimizer, device, epoch):
     model.train()
-    total = dict(loss=0., loss_np=0., loss_hv=0., loss_nc=0., np_iou=0.)
-    n = len(loader)
-
-    pbar = tqdm(loader, desc='Train', leave=False,
-                bar_format='{l_bar}{bar:20}{r_bar}')
-    for i, (imgs, bboxes, labels, hover_gts) in enumerate(pbar):
-        imgs      = imgs.to(device)
-        hover_gts = _to_device(hover_gts, device)
-
-        out = model(imgs)
-        loss, details = seg_loss(out, hover_gts)
-        np_iou = compute_np_iou(out, hover_gts)
-
+    losses = {'total': [], 'np': [], 'hv': [], 'hv_dir': [], 'nc': [], 'iou': []}
+    
+    pbar = tqdm(loader, desc=f'Train')
+    for batch in pbar:
+        imgs = batch['img'].to(device)
+        np_gt = batch['np_map'].to(device)
+        hv_gt = batch['hv_map'].to(device)
+        nc_gt = batch['nc_map'].to(device)
+        
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
-        optimizer.step()
-
-        total['loss']+= loss.item()
-        total['loss_np'] += details['loss_np']
-        total['loss_hv'] += details['loss_hv']
-        total['loss_nc'] += details['loss_nc']
-        total['np_iou']  += np_iou
-
-        pbar.set_postfix(
-            loss   = f"{loss.item():.4f}",
-            np     = f"{details['loss_np']:.4f}",
-            hv     = f"{details['loss_hv']:.4f}",
-            hv_dir = f"{details['hv_dir']:.4f}",   # ← 新增
-            nc     = f"{details['loss_nc']:.4f}",
-            iou    = f"{np_iou:.4f}",
+        out = model(imgs)
+        
+        # ===== 修改损失权重 =====
+        loss_np = F.binary_cross_entropy(out['np_map'], np_gt)
+        loss_hv_mse = F.mse_loss(out['hv_map'], hv_gt)
+        
+        # HV方向损失（归一化后计算余弦）
+        pred_norm = F.normalize(out['hv_map'].permute(0,2,3,1), dim=-1, eps=1e-8)
+        gt_norm = F.normalize(hv_gt.permute(0,2,3,1), dim=-1, eps=1e-8)
+        cos_sim = (pred_norm * gt_norm).sum(dim=-1)
+        loss_hv_dir = (1 - cos_sim).mean()
+        
+        # NC分类损失
+        loss_nc = F.cross_entropy(
+            out['nc_map'], 
+            nc_gt.argmax(1), 
+            label_smoothing=0.1  # 添加标签平滑
         )
-
-        if i == 0 and epoch % 5 == 0:
-            with torch.no_grad():
-                fg_mask = hover_gts['np_map'] > 0.5          # (B,1,H,W)
-                fg_mask2 = fg_mask.expand_as(out['hv_map'])
-
-                pred_fg = out['hv_map'][fg_mask2].abs().mean().item()
-                gt_fg   = hover_gts['hv_map'][fg_mask2].abs().mean().item()
-
-        # 余弦方向误差（越接近0越好）
-                eps = 1e-8
-                p_n = out['hv_map'] / (out['hv_map'].norm(dim=1, keepdim=True) + eps)
-                g_n = hover_gts['hv_map'] / (hover_gts['hv_map'].norm(dim=1, keepdim=True) + eps)
-                cos_err = ((1 - (p_n * g_n).sum(dim=1, keepdim=True)) * fg_mask).sum()
-                cos_err = cos_err / (fg_mask.sum() + eps)
-
-                print(
-                    f"\n[HV epoch={epoch}] "
-                    f"pred_mag={pred_fg:.4f}  gt_mag={gt_fg:.4f}  "
-                    f"cos_err={cos_err.item():.4f}"
-                    f"  ratio={pred_fg/(gt_fg+eps):.3f}"   # 健康值应在 0.7~1.3
-                )
-
-    return {k: v / n for k, v in total.items()}
+        
+        # IoU损失（辅助NP学习）
+        pred_binary = (out['np_map'] > 0.5).float()
+        gt_binary = (np_gt > 0.5).float()
+        intersection = (pred_binary * gt_binary).sum()
+        union = pred_binary.sum() + gt_binary.sum() - intersection
+        iou = intersection / (union + 1e-6)
+        loss_iou = 1 - iou
+        
+        # ===== 新权重配置 =====
+        loss = (
+            1.0 * loss_np +        # NP权重降低
+            3.0 * loss_hv_mse +    # HV MSE权重提高
+            2.0 * loss_hv_dir +    # 方向损失权重提高
+            1.5 * loss_nc +        # NC权重提高
+            0.5 * loss_iou         # IoU辅助
+        )
+        
+        loss.backward()
+        
+        # ===== 添加梯度裁剪 =====
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        
+        optimizer.step()
+        
+        losses['total'].append(loss.item())
+        losses['np'].append(loss_np.item())
+        losses['hv'].append(loss_hv_mse.item())
+        losses['hv_dir'].append(loss_hv_dir.item())
+        losses['nc'].append(loss_nc.item())
+        losses['iou'].append(iou.item())
+        
+        pbar.set_postfix({
+            'loss': f"{loss.item():.4f}",
+            'np': f"{loss_np.item():.4f}",
+            'hv': f"{loss_hv_mse.item():.4f}",
+            'hv_dir': f"{loss_hv_dir.item():.4f}",
+            'nc': f"{loss_nc.item():.4f}",
+            'iou': f"{iou.item():.4f}"
+        })
+    
+    return {k: np.mean(v) for k, v in losses.items()}
 
 # ── val ───────────────────────────────────────────────────────
+# train.py 中修改
+from utils.post_process import post_process_hovernet
+
 @torch.no_grad()
-def val_one_epoch(model, loader, device):
+def val_one_epoch(model, loader, device, epoch):
     model.eval()
-    total = dict(loss=0., loss_np=0., loss_hv=0., loss_nc=0., np_iou=0.)
-    n = len(loader)
-
-    pbar = tqdm(loader, desc='Val', leave=False,
-                bar_format='{l_bar}{bar:20}{r_bar}')
-    for imgs, bboxes, labels, hover_gts in pbar:
-        imgs      = imgs.to(device)
-        hover_gts = _to_device(hover_gts, device)
-
-        out          = model(imgs)
-        loss, details = seg_loss(out, hover_gts)
-        np_iou= compute_np_iou(out, hover_gts)
-
-        total['loss']    += loss.item()
-        total['loss_np'] += details['loss_np']
-        total['loss_hv'] += details['loss_hv']
-        total['loss_nc'] += details['loss_nc']
-        total['np_iou']  += np_iou
-
-        pbar.set_postfix(
-            loss=f"{loss.item():.4f}",
-            nc  =f"{details['loss_nc']:.4f}",
-            iou =f"{np_iou:.4f}",
-        )
-
-    return {k: v / n for k, v in total.items()}
+    losses = {'total': [], 'np': [], 'hv': [], 'hv_dir': [], 'nc': [], 'iou': []}
+    all_inst_results = []
+    
+    pbar = tqdm(loader, desc=f'Val')
+    for batch in pbar:
+        imgs = batch['img'].to(device)
+        np_gt = batch['np_map'].to(device)
+        hv_gt = batch['hv_map'].to(device)
+        nc_gt = batch['nc_map'].to(device)
+        
+        out = model(imgs)
+        
+        # 计算损失（保持原有逻辑）
+        loss_np = F.binary_cross_entropy(out['np_map'], np_gt)
+        loss_hv_mse = F.mse_loss(out['hv_map'], hv_gt)
+        
+        pred_norm = F.normalize(out['hv_map'].permute(0,2,3,1), dim=-1, eps=1e-8)
+        gt_norm = F.normalize(hv_gt.permute(0,2,3,1), dim=-1, eps=1e-8)
+        cos_sim = (pred_norm * gt_norm).sum(dim=-1)
+        loss_hv_dir = (1 - cos_sim).mean()
+        
+        loss_nc = F.cross_entropy(out['nc_map'], nc_gt.argmax(1), label_smoothing=0.1)
+        
+        pred_binary = (out['np_map'] > 0.5).float()
+        gt_binary = (np_gt > 0.5).float()
+        intersection = (pred_binary * gt_binary).sum()
+        union = pred_binary.sum() + gt_binary.sum() - intersection
+        iou = intersection / (union + 1e-6)
+        loss_iou = 1 - iou
+        
+        loss = 1.0*loss_np + 3.0*loss_hv_mse + 2.0*loss_hv_dir + 1.5*loss_nc + 0.5*loss_iou
+        
+        losses['total'].append(loss.item())
+        losses['np'].append(loss_np.item())
+        losses['hv'].append(loss_hv_mse.item())
+        losses['hv_dir'].append(loss_hv_dir.item())
+        losses['nc'].append(loss_nc.item())
+        losses['iou'].append(iou.item())
+        
+        # 新增：实例级后处理评估
+        for i in range(imgs.size(0)):
+            result = post_process_hovernet({
+                'np_map': out['np_map'][i:i+1],
+                'hv_map': out['hv_map'][i:i+1],
+                'nc_map': out['nc_map'][i:i+1]
+            }, min_area=10)
+            all_inst_results.append(result)
+        
+        pbar.set_postfix({
+            'loss': f"{loss.item():.4f}",
+            'iou': f"{iou.item():.4f}",
+            'nc': f"{loss_nc.item():.4f}"
+        })
+    
+    # 计算实例级指标
+    avg_inst_per_img = np.mean([len(r['inst_info']) for r in all_inst_results])
+    print(f"[Val epoch={epoch}] avg_instances={avg_inst_per_img:.1f}")
+    
+    return {k: np.mean(v) for k, v in losses.items()}
 
 # ── main ──────────────────────────────────────────────────────
 def main():
@@ -191,13 +243,31 @@ def main():
         base_ch=args.base_ch,
         num_classes=args.num_classes,
     ).to(device)
-    backbone_params = [p for n, p in model.named_parameters() if 'backbone' in n]
-    decoder_params  = [p for n, p in model.named_parameters() if 'decoder' in n]
-
-    optimizer = optim.AdamW([
-        {'params': backbone_params, 'lr': args.lr * 0.1,  'weight_decay': 1e-4},
-        {'params': decoder_params,  'lr': args.lr,        'weight_decay': 1e-4},
-    ])
+    # ===== 修改优化器：分组学习率 =====
+    backbone_params = []
+    decoder_params = []
+    for name, param in model.named_parameters():
+        if 'backbone' in name:
+            backbone_params.append(param)
+        else:
+            decoder_params.append(param)
+    
+    optimizer = torch.optim.AdamW([
+        {'params': backbone_params, 'lr': args.lr * 0.1},  # backbone用1/10学习率
+        {'params': decoder_params, 'lr': args.lr}          # decoder用完整学习率
+    ], weight_decay=1e-4)
+    
+    # ===== 修改学习率调度器 =====
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=[args.lr * 0.1, args.lr],  # 对应两组参数
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.1,        # 前10%用于warmup
+        anneal_strategy='cos',
+        div_factor=25.0,      # 初始lr = max_lr/25
+        final_div_factor=1e4  # 最终lr = max_lr/1e4
+    )
 
     def _warmup_cosine(epoch):
         warmup_epochs = 10

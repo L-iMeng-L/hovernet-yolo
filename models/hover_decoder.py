@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from models.attention import CBAM_Light, MultiScaleFusion
+
 
 class CBL(nn.Module):
     def __init__(self, c1, c2, k, s, p):
@@ -68,9 +70,15 @@ class ASPP(nn.Module):
         return self.fuse(torch.cat([feat1, feat2, feat3, feat4], dim=1))
 
 class EnhancedHead(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, use_attention=True):
         super().__init__()
         self.aspp = ASPP(in_ch, in_ch // 2)
+        
+        # 添加注意力
+        self.use_attention = use_attention
+        if use_attention:
+            self.attention = CBAM_Light(in_ch // 2)
+        
         self.refine = nn.Sequential(
             CBL(in_ch // 2, in_ch // 2, 3, 1, 1),
             CBL(in_ch // 2, in_ch // 2, 3, 1, 1),
@@ -79,6 +87,10 @@ class EnhancedHead(nn.Module):
     
     def forward(self, x):
         x = self.aspp(x)
+        
+        if self.use_attention:
+            x = self.attention(x)
+        
         x = self.refine(x)
         return self.out_conv(x)
 
@@ -88,19 +100,22 @@ class HoverDecoder(nn.Module):
         b = base_ch
         self.fpn = FPNFusion(c2=b*4, c3=b*8, c4=b*8, out_ch=b*4)
         
+        # NC头使用注意力（重点增强小核分类）
+        self.nc_head = nn.Sequential(
+            EnhancedHead(b*4, 128, use_attention=True),
+            nn.Conv2d(128, num_classes, 1)
+        )
+        
+        # NP和HV头保持原样
         self.np_head = nn.Sequential(
-            EnhancedHead(b*4, 64),
+            EnhancedHead(b*4, 64, use_attention=False),
             nn.Conv2d(64, 1, 1),
             nn.Sigmoid()
         )
         self.hv_head = nn.Sequential(
-            EnhancedHead(b*4, 64),
+            EnhancedHead(b*4, 64, use_attention=False),
             nn.Conv2d(64, 2, 1),
             nn.Tanh()
-        )
-        self.nc_head = nn.Sequential(
-            EnhancedHead(b*4, 128),
-            nn.Conv2d(128, num_classes, 1)
         )
     
     def forward(self, backbone_feats):
