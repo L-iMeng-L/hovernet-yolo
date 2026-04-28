@@ -5,7 +5,7 @@ import argparse
 import torch
 import torch.optim as optim
 from tqdm import tqdm
-
+import numpy as np
 from models.seg_model import HoverSegModel
 from losses.seg_loss import seg_loss
 from data.dataset import get_dataloader
@@ -42,7 +42,7 @@ def get_args():
     p = argparse.ArgumentParser()
     p.add_argument('--data_root',default='/home/lwy/dataset/PanNuke/processed')
     p.add_argument('--val_fold',    default='Fold2')
-    p.add_argument('--epochs',      type=int,   default=100)
+    p.add_argument('--epochs',      type=int,   default=80)
     p.add_argument('--batch_size',  type=int,   default=32)
     p.add_argument('--lr',          type=float, default=1e-4)
     p.add_argument('--img_size',    type=int,   default=640)
@@ -92,20 +92,35 @@ def train_one_epoch(model, loader, optimizer, device, epoch):
         total['np_iou']  += np_iou
 
         pbar.set_postfix(
-            loss=f"{loss.item():.4f}",
-            focal  = f"{details['loss_focal']:.4f}",
-            dice   = f"{details['loss_dice']:.4f}",
-            hv  =f"{details['loss_hv']:.4f}",
-            nc  =f"{details['loss_nc']:.4f}",
-            iou =f"{np_iou:.4f}",
+            loss   = f"{loss.item():.4f}",
+            np     = f"{details['loss_np']:.4f}",
+            hv     = f"{details['loss_hv']:.4f}",
+            hv_dir = f"{details['hv_dir']:.4f}",   # ← 新增
+            nc     = f"{details['loss_nc']:.4f}",
+            iou    = f"{np_iou:.4f}",
         )
 
         if i == 0 and epoch % 5 == 0:
             with torch.no_grad():
-                fg= (hover_gts['hv_map'].abs() > 0.01)
-                pred_fg = out['hv_map'][fg].abs().mean().item()
-                gt_fg   = hover_gts['hv_map'][fg].abs().mean().item()
-            print(f"\n[HV诊断 epoch={epoch}]前景 pred={pred_fg:.4f} gt={gt_fg:.4f}")
+                fg_mask = hover_gts['np_map'] > 0.5          # (B,1,H,W)
+                fg_mask2 = fg_mask.expand_as(out['hv_map'])
+
+                pred_fg = out['hv_map'][fg_mask2].abs().mean().item()
+                gt_fg   = hover_gts['hv_map'][fg_mask2].abs().mean().item()
+
+        # 余弦方向误差（越接近0越好）
+                eps = 1e-8
+                p_n = out['hv_map'] / (out['hv_map'].norm(dim=1, keepdim=True) + eps)
+                g_n = hover_gts['hv_map'] / (hover_gts['hv_map'].norm(dim=1, keepdim=True) + eps)
+                cos_err = ((1 - (p_n * g_n).sum(dim=1, keepdim=True)) * fg_mask).sum()
+                cos_err = cos_err / (fg_mask.sum() + eps)
+
+                print(
+                    f"\n[HV epoch={epoch}] "
+                    f"pred_mag={pred_fg:.4f}  gt_mag={gt_fg:.4f}  "
+                    f"cos_err={cos_err.item():.4f}"
+                    f"  ratio={pred_fg/(gt_fg+eps):.3f}"   # 健康值应在 0.7~1.3
+                )
 
     return {k: v / n for k, v in total.items()}
 
@@ -177,15 +192,16 @@ def main():
         num_classes=args.num_classes,
     ).to(device)
 
-    # ← NC 分支lr从 2× 降到 0.5×，避免分类头过拟合
-    nc_params= [p for n, p in model.named_parameters() if 'nc' in n]
-    other_params = [p for n, p in model.named_parameters() if 'nc' not in n]
+    hv_params    = [p for n, p in model.named_parameters() if 'hv' in n]
+    nc_params    = [p for n, p in model.named_parameters() if 'nc' in n]
+    other_params = [p for n, p in model.named_parameters()
+                if 'hv' not in n and 'nc' not in n]
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=1e-4,
-    )
+    optimizer = optim.AdamW([
+        {'params': other_params, 'lr': args.lr,        'weight_decay': 1e-4},
+        {'params': hv_params,    'lr': args.lr * 3.0,  'weight_decay': 1e-5},  # HV头 3× lr
+        {'params': nc_params,    'lr': args.lr,         'weight_decay': 1e-4},
+    ])
     def _warmup_cosine(epoch):
         warmup_epochs = 5
         if epoch < warmup_epochs:

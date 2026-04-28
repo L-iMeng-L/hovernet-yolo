@@ -189,7 +189,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = HoverSegModel(base_ch=args.base_ch, num_classes=args.num_classes).to(device)
-    ckpt  = torch.load(args.ckpt, map_location=device)
+    ckpt  = torch.load(args.ckpt, map_location=device, weights_only=False)
     model.load_state_dict(ckpt['model_state'])
     print(f"[Loaded] epoch={ckpt['epoch']}  best_val_loss={ckpt['best_val_loss']:.4f}")
 
