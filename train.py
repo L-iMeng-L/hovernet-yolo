@@ -35,7 +35,7 @@ CSV_FIELDS = [
 def get_args():
     p = argparse.ArgumentParser()
     p.add_argument('--data_root',default='/home/lwy/dataset/PanNuke/processed')
-    p.add_argument('--val_fold',    default='Fold2')
+    p.add_argument('--val_fold',    default='Fold3')
     p.add_argument('--epochs',      type=int,   default=80)
     p.add_argument('--batch_size',  type=int,   default=32)
     p.add_argument('--lr',          type=float, default=1e-4)
@@ -44,7 +44,7 @@ def get_args():
     p.add_argument('--num_classes', type=int,   default=5)
     p.add_argument('--save_dir',    default='./runs')
     p.add_argument('--resume',      default='')
-    p.add_argument('--num_workers', type=int,   default=8)
+    p.add_argument('--num_workers', type=int,   default=16)
     p.add_argument('--patience',    type=int,   default=15)
     return p.parse_args()
 

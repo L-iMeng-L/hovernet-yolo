@@ -5,61 +5,103 @@ from scipy.ndimage import measurements
 from skimage.segmentation import watershed
 from skimage.morphology import remove_small_objects
 
-def process_instance(np_map, hv_map, min_area=10):
+# utils/post_process.py
+
+from skimage.morphology import remove_small_holes  # 添加导入
+
+def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=8, peak_thresh=0.4):
     """
-    使用 NP + HV 生成实例分割图
+    实例分割（可调参数版本）
     
     Args:
-        np_map: (H, W) 核概率图
-        hv_map: (2, H, W) 水平/垂直距离图
-        min_area: 最小核面积
-    
-    Returns:
-        inst_map: (H, W) 实例ID图，0为背景
+        np_map: (H,W) 核概率图
+        hv_map: (2,H,W) HV距离图
+        min_area: 最小细胞面积（增大减少细胞）
+        np_thresh: NP二值化阈值（增大减少细胞）
+        min_distance: 种子点最小间距（增大减少细胞）
+        peak_thresh: 种子点能量阈值（增大减少细胞）
     """
-    # 1. 二值化NP
-    np_binary = (np_map > 0.5).astype(np.uint8)
+    # 1. 二值化
+    np_binary = (np_map > np_thresh).astype(np.uint8)
     
-    # 2. 计算能量图（距离到质心的负值）
+    # 2. 能量图
     h_dir = hv_map[0]
     v_dir = hv_map[1]
     energy = np.sqrt(h_dir**2 + v_dir**2)
-    energy = 1.0 - energy  # 质心处能量最高
+    energy = 1.0 - energy
     
-    # 3. 找种子点（局部极大值）
+    # 3. 找种子点
     from skimage.feature import peak_local_max
     from skimage.morphology import dilation, disk
     
-    # 平滑能量图
     energy_smooth = cv2.GaussianBlur(energy, (5, 5), 0)
     
-    # 找局部极大值作为种子
     coordinates = peak_local_max(
         energy_smooth,
-        min_distance=5,
-        threshold_abs=0.3,
+        min_distance=min_distance,
+        threshold_abs=peak_thresh,
         exclude_border=False
     )
     
-    # 生成marker
     markers = np.zeros_like(np_binary, dtype=np.int32)
     for idx, (y, x) in enumerate(coordinates, start=1):
-        if np_binary[y, x] > 0:  # 只在前景区域
+        if np_binary[y, x] > 0:
             markers[y, x] = idx
     
-    # 膨胀marker避免过分割
     markers = dilation(markers, disk(2))
     
-    # 4. 分水岭分割
+    # 4. 分水岭
     inst_map = watershed(-energy, markers, mask=np_binary)
     
-    # 5. 移除小对象
-    inst_map = remove_small_objects(inst_map, min_size=min_area)
+    # 5. 移除小对象（修复警告）
+    inst_map = remove_small_holes(
+        remove_small_holes(inst_map.astype(bool), area_threshold=min_area),
+        area_threshold=min_area
+    ).astype(np.int32) * inst_map
+    inst_map = np.where(
+        np.isin(inst_map, [i for i in np.unique(inst_map) if (inst_map == i).sum() >= min_area]),
+        inst_map, 0
+    )
     
     # 重新编号
     inst_map = measurements.label(inst_map > 0)[0]
     
     return inst_map
+
+def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6, energy_thresh=0.4, 
+                      min_area=30, min_distance=8, peak_thresh=0.4):
+    """批量后处理（可调参数）"""
+    B = np_maps.shape[0]
+    np_maps = np_maps.cpu().numpy()[:, 0]
+    hv_maps = hv_maps.cpu().numpy()
+    nc_maps = nc_maps.cpu().numpy()
+    
+    nc_maps = np.exp(nc_maps) / np.exp(nc_maps).sum(axis=1, keepdims=True)
+    
+    inst_maps = []
+    cls_dicts = []
+    
+    for b in range(B):
+        inst_map = process_instance(
+            np_maps[b], hv_maps[b], 
+            min_area=min_area,
+            np_thresh=np_thresh,
+            min_distance=min_distance,
+            peak_thresh=peak_thresh
+        )
+        inst_maps.append(inst_map)
+        
+        nc_pred = nc_maps[b]
+        cls_dict = {}
+        for inst_id in np.unique(inst_map):
+            if inst_id == 0:
+                continue
+            mask = inst_map == inst_id
+            inst_probs = nc_pred[:, mask].mean(axis=1)
+            cls_dict[int(inst_id)] = int(inst_probs.argmax())
+        cls_dicts.append(cls_dict)
+    
+    return inst_maps, cls_dicts
 
 def classify_instances(inst_map, nc_map):
     """
@@ -150,3 +192,4 @@ def post_process_hovernet(outputs, min_area=10):
         'np_map': np_map,
         'hv_map': hv_map
     }
+
