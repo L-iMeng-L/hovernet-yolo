@@ -190,7 +190,7 @@ def get_args():
     p.add_argument('--np_thresh',     type=float, default=0.5)
     p.add_argument('--peak_thresh',   type=float, default=0.2)
     p.add_argument('--min_area',      type=int,   default=10)
-    p.add_argument('--min_distance',  type=int,   default=10)   
+    p.add_argument('--min_distance',  type=int,   default=2)   
     return p.parse_args()
 
 def main():

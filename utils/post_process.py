@@ -6,6 +6,10 @@ from skimage.segmentation import watershed
 from skimage.morphology import remove_small_objects
 from skimage.morphology import remove_small_holes  
 
+# 忽略 skimage 废弃参数警告 (area_threshold → max_size)
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*area_threshold.*remove_small_holes.*")
+
 def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=3, peak_thresh=0.3):
     """
     实例分割（可调参数版本）
