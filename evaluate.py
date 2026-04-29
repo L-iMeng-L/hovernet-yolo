@@ -21,13 +21,15 @@ def get_args():
     p.add_argument('--data_root',      default='/home/lwy/dataset/PanNuke/processed')
     p.add_argument('--save_dir',       default='',
                    help='结果保存目录；默认与ckpt 同目录')
-    p.add_argument('--batch_size',     type=int,   default=8)
+    p.add_argument('--batch_size',     type=int,   default=32)
     p.add_argument('--img_size',       type=int,   default=640)
     p.add_argument('--base_ch',        type=int,   default=64)
     p.add_argument('--num_classes',    type=int,   default=5)
     p.add_argument('--num_workers',    type=int,   default=4)
-    p.add_argument('--np_thresh',      type=float, default=0.5)
-    p.add_argument('--energy_thresh',  type=float, default=0.4)
+    p.add_argument('--np_thresh',      type=float, default=0.6)
+    p.add_argument('--peak_thresh',    type=float, default=0.2)
+    p.add_argument('--min_area',       type=int,   default=8)
+    p.add_argument('--min_distance',   type=int,   default=2)
     p.add_argument('--match_iou',      type=float, default=0.5)
     return p.parse_args()
 
@@ -104,7 +106,9 @@ def evaluate(model, loader, device, args):
         pred_insts, pred_cls_list = batch_postprocess(
             out['np_map'], out['hv_map'], out['nc_map'],
             np_thresh=args.np_thresh,
-            energy_thresh=args.energy_thresh,
+            peak_thresh=args.peak_thresh,
+            min_area=args.min_area,
+            min_distance=args.min_distance
         )
 
         true_insts= [m.cpu().numpy() for m in hover_gts['inst_map']]
