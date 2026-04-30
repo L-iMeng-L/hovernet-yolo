@@ -1,77 +1,56 @@
-# utils/post_process.py
 import cv2
 import numpy as np
-from scipy.ndimage import measurements
+from scipy.ndimage import measurements, binary_fill_holes
 from skimage.segmentation import watershed
 from skimage.morphology import remove_small_objects
-from skimage.morphology import remove_small_holes  
 
-# 忽略 skimage 废弃参数警告 (area_threshold → max_size)
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, message=".*area_threshold.*remove_small_holes.*")
-
-def process_instance(np_map, hv_map, min_area=10, np_thresh=0.6, min_distance=3, peak_thresh=0.3):
-    """
-    实例分割（可调参数版本）
+def process_instance(np_map, hv_map, min_area=5, np_thresh=0.5, ksize=21, overall_thresh=0.4, marker_ksize=5):
+    h_dir_raw = hv_map[0]
+    v_dir_raw = hv_map[1]
     
-    Args:
-        np_map: (H,W) 核概率图
-        hv_map: (2,H,W) HV距离图
-        min_area: 最小细胞面积（增大减少细胞）
-        np_thresh: NP二值化阈值（增大减少细胞）
-        min_distance: 种子点最小间距（增大减少细胞）
-        peak_thresh: 种子点能量阈值（增大减少细胞）
-    """
-    # 1. 二值化
-    np_binary = (np_map > np_thresh).astype(np.uint8)
+    # 1. 二值化 + 连通域过滤
+    blb = (np_map >= np_thresh).astype(np.int32)
+    blb = measurements.label(blb)[0]
+    blb = remove_small_objects(blb, min_size=min_area)
+    blb = (blb > 0).astype(np.int32)
     
-    # 2. 能量图
-    h_dir = hv_map[0]
-    v_dir = hv_map[1]
-    energy = np.sqrt(h_dir**2 + v_dir**2)
-    energy = 1.0 - energy
+    # 2. HV归一化
+    h_dir = cv2.normalize(h_dir_raw, None, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
+    v_dir = cv2.normalize(v_dir_raw, None, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
     
-    # 3. 找种子点
-    from skimage.feature import peak_local_max
-    from skimage.morphology import dilation, disk
+    # 3. Sobel梯度
+    sobelh = cv2.Sobel(h_dir, cv2.CV_64F, 1, 0, ksize=ksize)
+    sobelv = cv2.Sobel(v_dir, cv2.CV_64F, 0, 1, ksize=ksize)
     
-    energy_smooth = cv2.GaussianBlur(energy, (5, 5), 0)
+    sobelh = 1 - cv2.normalize(sobelh, None, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
+    sobelv = 1 - cv2.normalize(sobelv, None, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
     
-    coordinates = peak_local_max(
-        energy_smooth,
-        min_distance=min_distance,
-        threshold_abs=peak_thresh,
-        exclude_border=False
-    )
+    overall = np.maximum(sobelh, sobelv)
+    overall = overall - (1 - blb)  # 修正
+    overall[overall < 0] = 0
     
-    markers = np.zeros_like(np_binary, dtype=np.int32)
-    for idx, (y, x) in enumerate(coordinates, start=1):
-        if np_binary[y, x] > 0:
-            markers[y, x] = idx
+    # 4. 距离变换
+    dist = (1.0 - overall) * blb
+    dist = -cv2.GaussianBlur(dist, (3, 3), 0)
     
-    markers = dilation(markers, disk(2))
+    overall = (overall >= overall_thresh).astype(np.int32)  # 修正
     
-    # 4. 分水岭
-    inst_map = watershed(-energy, markers, mask=np_binary)
+    # 5. 生成marker
+    marker = blb - overall  # 修正
+    marker[marker < 0] = 0
+    marker = binary_fill_holes(marker).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (marker_ksize, marker_ksize))
+    marker = cv2.morphologyEx(marker, cv2.MORPH_OPEN, kernel)
+    marker = measurements.label(marker)[0]
+    marker = remove_small_objects(marker, min_size=min_area)
     
-    # 5. 移除小对象
-    inst_map = remove_small_holes(
-        remove_small_holes(inst_map.astype(bool), area_threshold=min_area),
-        area_threshold=min_area
-    ).astype(np.int32) * inst_map
-    inst_map = np.where(
-        np.isin(inst_map, [i for i in np.unique(inst_map) if (inst_map == i).sum() >= min_area]),
-        inst_map, 0
-    )
-    
-    # 重新编号
-    inst_map = measurements.label(inst_map > 0)[0]
+    # 6. 分水岭
+    inst_map = watershed(dist, markers=marker, mask=blb)
     
     return inst_map
 
-def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6, 
-                      min_area=30, min_distance=8, peak_thresh=0.4):
-    """批量后处理"""
+def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.5, min_area=10, 
+                      ksize=21, overall_thresh=0.4, marker_ksize=5, **kwargs):
     B = np_maps.shape[0]
     np_maps = np_maps.cpu().numpy()[:, 0]
     hv_maps = hv_maps.cpu().numpy()
@@ -87,8 +66,9 @@ def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6,
             np_maps[b], hv_maps[b], 
             min_area=min_area,
             np_thresh=np_thresh,
-            min_distance=min_distance,
-            peak_thresh=peak_thresh
+            ksize=ksize,
+            overall_thresh=overall_thresh,
+            marker_ksize=marker_ksize
         )
         inst_maps.append(inst_map)
         
@@ -105,43 +85,20 @@ def batch_postprocess(np_maps, hv_maps, nc_maps, np_thresh=0.6,
     return inst_maps, cls_dicts
 
 def classify_instances(inst_map, nc_map):
-    """
-    对每个实例进行分类投票
-    
-    Args:
-        inst_map: (H, W) 实例ID图
-        nc_map: (num_classes, H, W) 分类概率图
-    
-    Returns:
-        inst_type_map: (H, W) 每个像素的实例类别
-        inst_info: dict, 每个实例的详细信息
-    """
-    num_classes = nc_map.shape[0]
     inst_ids = np.unique(inst_map)
-    inst_ids = inst_ids[inst_ids > 0]  # 排除背景
+    inst_ids = inst_ids[inst_ids > 0]
     
     inst_type_map = np.zeros_like(inst_map, dtype=np.int32)
     inst_info = {}
     
     for inst_id in inst_ids:
-        # 获取该实例的mask
         inst_mask = (inst_map == inst_id)
-        
-        # 提取该实例内所有像素的分类概率
-        inst_probs = nc_map[:, inst_mask]  # (num_classes, N_pixels)
-        
-        # 方法1: 平均投票（推荐）
-        avg_prob = inst_probs.mean(axis=1)  # (num_classes,)
+        inst_probs = nc_map[:, inst_mask]
+        avg_prob = inst_probs.mean(axis=1)
         pred_type = np.argmax(avg_prob)
         
-        # 方法2: 多数投票（备选）
-        # pixel_types = np.argmax(inst_probs, axis=0)
-        # pred_type = np.bincount(pixel_types).argmax()
-        
-        # 填充类别
         inst_type_map[inst_mask] = pred_type
         
-        # 保存实例信息
         inst_info[int(inst_id)] = {
             'type': int(pred_type),
             'type_prob': avg_prob.tolist(),
@@ -153,7 +110,6 @@ def classify_instances(inst_map, nc_map):
     return inst_type_map, inst_info
 
 def get_bbox(mask):
-    """计算mask的边界框"""
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     if not rows.any() or not cols.any():
@@ -163,27 +119,13 @@ def get_bbox(mask):
     return [int(cmin), int(rmin), int(cmax), int(rmax)]
 
 def post_process_hovernet(outputs, min_area=10):
-    """
-    完整的HoverNet后处理
+    np_map = outputs['np_map'].squeeze().cpu().numpy()
+    hv_map = outputs['hv_map'].squeeze().cpu().numpy()
+    nc_map = outputs['nc_map'].squeeze().cpu().numpy()
     
-    Args:
-        outputs: dict, 包含 'np_map', 'hv_map', 'nc_map'
-        min_area: 最小核面积
-    
-    Returns:
-        results: dict, 包含实例分割和分类结果
-    """
-    np_map = outputs['np_map'].squeeze().cpu().numpy()  # (H, W)
-    hv_map = outputs['hv_map'].squeeze().cpu().numpy()  # (2, H, W)
-    nc_map = outputs['nc_map'].squeeze().cpu().numpy()  # (C, H, W)
-    
-    # Softmax归一化分类概率
     nc_map = np.exp(nc_map) / np.exp(nc_map).sum(axis=0, keepdims=True)
     
-    # 1. 实例分割
     inst_map = process_instance(np_map, hv_map, min_area)
-    
-    # 2. 实例分类
     inst_type_map, inst_info = classify_instances(inst_map, nc_map)
     
     return {
@@ -193,4 +135,3 @@ def post_process_hovernet(outputs, min_area=10):
         'np_map': np_map,
         'hv_map': hv_map
     }
-

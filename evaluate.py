@@ -5,7 +5,9 @@ import argparse
 import torch
 import numpy as np
 from tqdm import tqdm
-
+from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 from models.seg_model import HoverSegModel
 from data.dataset import get_dataloader
 from utils.post_process import batch_postprocess
@@ -146,6 +148,9 @@ def evaluate(model, loader, device, args):
     save_dir = args.save_dir or os.path.dirname(args.ckpt)
     _save_metrics(metrics, save_dir, args.val_fold)
 
+    plot_confusion_matrix(all_pred_cls, all_true_cls, args.num_classes, 
+                         save_dir, args.val_fold)
+
     return metrics
 
 def _print_metrics(metrics, fold_name):
@@ -187,7 +192,52 @@ def _save_metrics(metrics, save_dir, fold_name):
     print(f'[Saved] {json_path}')
     print(f'[Saved] {txt_path}')
 
-# ──────────────────────────────────────────────────────────────
+def plot_confusion_matrix(all_pred_cls, all_true_cls, num_classes, save_dir, fold_name):
+    """绘制混淆矩阵"""
+    # 收集所有像素级预测
+    all_true_labels = []
+    all_pred_labels = []
+    
+    for pred_cls, true_cls in zip(all_pred_cls, all_true_cls):
+        for inst_id in true_cls.keys():
+            if inst_id in pred_cls:
+                all_true_labels.append(true_cls[inst_id])
+                all_pred_labels.append(pred_cls[inst_id])
+    
+    if len(all_true_labels) == 0:
+        print("No matched instances for confusion matrix")
+        return
+    
+    # 计算混淆矩阵
+    cm = confusion_matrix(all_true_labels, all_pred_labels, labels=list(range(num_classes)))
+    cm_norm = cm.astype('float') / (cm.sum(axis=1, keepdims=True) + 1e-10)
+    
+    # 绘制
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # 原始计数
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax1)
+    ax1.set_title('Confusion Matrix (Counts)')
+    ax1.set_ylabel('True Label')
+    ax1.set_xlabel('Predicted Label')
+    
+    # 归一化
+    sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
+                xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax2)
+    ax2.set_title('Confusion Matrix (Normalized)')
+    ax2.set_ylabel('True Label')
+    ax2.set_xlabel('Predicted Label')
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f'confusion_matrix_{fold_name}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f'[Saved] {save_path}')
+
+
+
 def main():
     args   = get_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

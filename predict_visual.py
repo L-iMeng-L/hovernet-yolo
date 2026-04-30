@@ -95,11 +95,12 @@ def predict_visual(model, loader, device, args):
 
         # ── 后处理 ────────────────────────────────────────────
         pred_insts, pred_cls_list = batch_postprocess(
-            out['np_map'], out['hv_map'], out['nc_map'],
-            np_thresh    = args.np_thresh,
-            min_area     = args.min_area,
-            min_distance = args.min_distance,
-            peak_thresh  = args.peak_thresh
+        out['np_map'], out['hv_map'], out['nc_map'],
+        np_thresh      = args.np_thresh,
+        ksize          = args.ksize,           
+        overall_thresh = args.overall_thresh,  
+        marker_ksize   = args.marker_ksize,    
+        min_area       = args.min_area,
         )
 
         # GT 实例图
@@ -181,16 +182,17 @@ def get_args():
     p.add_argument('--data_root',     default='/home/lwy/dataset/PanNuke/processed')
     p.add_argument('--val_fold',      default='Fold2')
     p.add_argument('--save_dir',      default='vis_output')
-    p.add_argument('--num_samples',   type=int,   default=8)
+    p.add_argument('--num_samples',   type=int,   default=4)
     p.add_argument('--batch_size',    type=int,   default=4)
     p.add_argument('--img_size',      type=int,   default=640)
     p.add_argument('--base_ch',       type=int,   default=64)
     p.add_argument('--num_classes',   type=int,   default=5)
     p.add_argument('--num_workers',   type=int,   default=2)
-    p.add_argument('--np_thresh',     type=float, default=0.5)
-    p.add_argument('--peak_thresh',   type=float, default=0.2)
-    p.add_argument('--min_area',      type=int,   default=5)
-    p.add_argument('--min_distance',  type=int,   default=3)   
+    p.add_argument('--np_thresh',     type=float, default=0.1)
+    p.add_argument('--ksize',         type=int,   default=11)
+    p.add_argument('--overall_thresh',type=float, default=0.3)
+    p.add_argument('--marker_ksize',  type=int,   default=3)
+    p.add_argument('--min_area',      type=int,   default=3)
     return p.parse_args()
 
 def main():

@@ -1,38 +1,35 @@
 #!/usr/bin/env bash
-# train_3fold.sh
-# 三折交叉验证：训练 → 评估 → 汇总
-# 用法: bash train_3fold.sh [--epochs 100--batch_size 8 ...]
 set -e
 
-#── 可在此修改默认路径 ────────────────────────────────────────
 DATA_ROOT="${DATA_ROOT:-/home/lwy/dataset/PanNuke/processed}"
 SAVE_DIR="${SAVE_DIR:-./runs}"
 SUMMARY_DIR="${SUMMARY_DIR:-./runs/summary}"
+ENABLE_SEARCH="${ENABLE_SEARCH:-true}"
 
 EXTRA_ARGS="$@"
-
 VAL_FOLDS=("Fold1" "Fold2" "Fold3")
 
 echo "=========================================="
 echo "  HoverNet-YOLO  3-Fold Cross Validation"
-echo "  data_root : ${DATA_ROOT}"
-echo "  save_dir  : ${SAVE_DIR}"
-echo "  Extra args: ${EXTRA_ARGS:-none}"
+echo "  data_root    : ${DATA_ROOT}"
+echo "  save_dir     : ${SAVE_DIR}"
+echo "  param_search : ${ENABLE_SEARCH}"
+echo "  Extra args   : ${EXTRA_ARGS:-none}"
 echo "=========================================="
 
 mkdir -p "${SUMMARY_DIR}"
 START_TIME=$(date +%s)
 
-# ── 逐折训练 + 评估 ───────────────────────────────────────────
 for i in "${!VAL_FOLDS[@]}"; do
     VAL=${VAL_FOLDS[$i]}
     FOLD_IDX=$((i + 1))
 
+    # ── 训练 ──────────────────────────────────────────────
     echo ""
-    echo "------------------------------------------"
+    echo "=========================================="
     echo "  [${FOLD_IDX}/3] Training  val=${VAL}"
     echo "  $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "------------------------------------------"
+    echo "=========================================="
 
     python train.py \
         --val_fold   "${VAL}" \
@@ -40,15 +37,7 @@ for i in "${!VAL_FOLDS[@]}"; do
         --save_dir   "${SAVE_DIR}" \
         ${EXTRA_ARGS}
 
-    echo ""
-    echo "------------------------------------------"
-    echo "  [${FOLD_IDX}/3] Evaluating  val=${VAL}"
-    echo "  $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "------------------------------------------"
-
-    #找到本折best.pt（train.py 保存在 runs/FoldX_FoldY_vs_FoldZ/best.pt）
-    # 训练脚本把 val_fold 排除后，另外两折按字母序拼成目录名
-    # 例: val=Fold2 → Fold1_Fold3_vs_Fold2
+    # ── 准备路径 ──────────────────────────────────────────
     ALL_FOLDS=("Fold1" "Fold2" "Fold3")
     TRAIN_FOLDS=()
     for f in "${ALL_FOLDS[@]}"; do
@@ -62,105 +51,115 @@ for i in "${!VAL_FOLDS[@]}"; do
         exit 1
     fi
 
+    # ── 参数搜索 ──────────────────────────────────────────
+    if [[ "${ENABLE_SEARCH}" == "true" ]]; then
+        echo ""
+        echo "=========================================="
+        echo "  [${FOLD_IDX}/3] Param Search  val=${VAL}"
+        echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "=========================================="
+
+        python bayesian_search.py \
+            --ckpt        "${CKPT}" \
+            --val_fold    "${VAL}" \
+            --data_root   "${DATA_ROOT}" \
+            --n_calls     300 \
+            --sample_size 200 \
+            --save_dir    "${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}"
+
+        # 读取最优参数
+        BEST_JSON="${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}/best_params_${VAL}.json"
+        if [[ ! -f "${BEST_JSON}" ]]; then
+            echo "[WARN] best_params not found, using defaults"
+            NP_T=0.32; OV_T=0.4; MK_K=3; MIN_A=3
+        else
+            read NP_T OV_T _ MK_K MIN_A <<< $(python3 -c "
+import json
+with open('${BEST_JSON}') as f:
+    p = json.load(f)['best_params']
+print(p['np_thresh'], p['overall_thresh'], p['ksize'], p['marker_ksize'], p['min_area'])
+")
+        fi
+    else
+        NP_T=0.32; OV_T=0.4; MK_K=3; MIN_A=3
+    fi
+
+    # ── 评估 ──────────────────────────────────────────────
+    echo ""
+    echo "=========================================="
+    echo "  [${FOLD_IDX}/3] Evaluating  val=${VAL}"
+    echo "  Params: np=${NP_T} ov=${OV_T} mk=${MK_K} ma=${MIN_A}"
+    echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=========================================="
+
     python evaluate.py \
-        --ckpt          "${CKPT}" \
-        --val_fold      "${VAL}" \
-        --data_root     "${DATA_ROOT}" \
-        --save_dir      "${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}" \
+        --ckpt           "${CKPT}" \
+        --val_fold       "${VAL}" \
+        --data_root      "${DATA_ROOT}" \
+        --save_dir       "${SAVE_DIR}/${TRAIN_STR}_vs_${VAL}" \
+        --np_thresh      "${NP_T}" \
+        --overall_thresh "${OV_T}" \
+        --marker_ksize   "${MK_K}" \
+        --min_area       "${MIN_A}" \
         ${EXTRA_ARGS}
 
-    echo "  [${FOLD_IDX}/3] done✓"
+    echo "  [${FOLD_IDX}/3] ✓ Done"
 done
 
-# ── 汇总 3折均值 ─────────────────────────────────────────────
+# ── 三折汇总 ──────────────────────────────────────────────
 echo ""
-echo "------------------------------------------"
-echo "  Aggregating 3-fold results..."
-echo "------------------------------------------"
+echo "=========================================="
+echo "  Summarizing 3-Fold Results"
+echo "=========================================="
 
-python -<<'PYEOF'
-import os, json, sys
-import numpy as np
+python3 << 'PYEOF'
+import os, json, glob
 
-save_dir    = os.environ.get('SAVE_DIR','./runs')
+save_dir = os.environ.get('SAVE_DIR', './runs')
 summary_dir = os.environ.get('SUMMARY_DIR', './runs/summary')
-val_folds   = ['Fold1', 'Fold2', 'Fold3']
-all_folds   = ['Fold1', 'Fold2', 'Fold3']
-
-CLASS_NAMES = ['Neoplastic', 'Inflammatory', 'Connective', 'Dead', 'Epithelial']
-METRIC_KEYS = ['PQ', 'DQ', 'SQ', 'F1', 'Precision', 'Recall', 'cls_acc']
-
-fold_metrics = []
-for val in val_folds:
-    train = [f for f in all_folds if f != val]
-    train_str = '_'.join(train)
-    json_path = os.path.join(save_dir, f'{train_str}_vs_{val}', f'metrics_{val}.json')
-    if not os.path.exists(json_path):
-        print(f'[WARN] not found: {json_path}', file=sys.stderr)
-        continue
-    with open(json_path) as f:
-        fold_metrics.append((val, json.load(f)))
-
-if not fold_metrics:
-    print('[ERROR] no metrics found', file=sys.stderr)
-    sys.exit(1)
-
-#整体指标均值
-summary = {}
-for key in METRIC_KEYS:
-    vals = [m[key] for _, m in fold_metrics]
-    summary[key] = {'mean': float(np.mean(vals)), 'std': float(np.std(vals)),
-                    'per_fold': {v: float(m[key]) for v, m in fold_metrics}}
-
-# per-class PQ 均值
-per_cls_summary = {}
-for cls in CLASS_NAMES:
-    for metric in ['PQ', 'DQ', 'SQ']:
-        vals = [m['per_class'][cls][metric] for _, m in fold_metrics]
-        per_cls_summary.setdefault(cls, {})[metric] = {
-            'mean': float(np.mean(vals)),
-            'std':  float(np.std(vals)),
-        }
-summary['per_class'] = per_cls_summary
-
-# 保存 json
 os.makedirs(summary_dir, exist_ok=True)
-json_out = os.path.join(summary_dir, '3fold_summary.json')
-with open(json_out, 'w') as f:
+
+results = []
+for fold in ['Fold1', 'Fold2', 'Fold3']:
+    pattern = f"{save_dir}/*_vs_{fold}/metrics_{fold}.json"
+    files = glob.glob(pattern)
+    if files:
+        with open(files[0]) as f:
+            data = json.load(f)
+            results.append({'fold': fold, **data})
+
+if not results:
+    print("[WARN] No metrics found")
+    exit(0)
+
+keys = ['PQ', 'DQ', 'SQ', 'F1', 'Precision', 'Recall', 'cls_acc']
+avg = {k: sum(r[k] for r in results) / len(results) for k in keys}
+
+summary = {'per_fold': results, 'average': avg}
+
+with open(f"{summary_dir}/3fold_summary.json", 'w') as f:
     json.dump(summary, f, indent=2)
 
-# 打印 + 保存 txt
-sep = '=' * 65
-lines = [sep,
-         '  3-Fold Cross Validation Summary',
-         sep]
-for key in METRIC_KEYS:
-    v = summary[key]
-    fold_str = '  '.join(f"{fv}={v['per_fold'][fv]:.4f}" for fv in val_folds
-                          if fv in v['per_fold'])
-    lines.append(f"  {key:<12}: {v['mean']:.4f} ± {v['std']:.4f}({fold_str})")
+with open(f"{summary_dir}/3fold_summary.txt", 'w') as f:
+    f.write("=" * 60 + "\n")
+    f.write("  3-Fold Cross Validation Summary\n")
+    f.write("=" * 60 + "\n\n")
+    for r in results:
+        f.write(f"{r['fold']}:\n")
+        for k in keys:
+            f.write(f"  {k:12s}: {r[k]:.4f}\n")
+        f.write("\n")
+    f.write("-" * 60 + "\n")
+    f.write("Average:\n")
+    for k in keys:
+        f.write(f"  {k:12s}: {avg[k]:.4f}\n")
+    f.write("=" * 60 + "\n")
 
-lines += ['', 'Per-class PQ (mean ± std):', '-' * 65]
-for cls in CLASS_NAMES:
-    v = per_cls_summary[cls]
-    lines.append(
-        f"  {cls:<14}: "
-        f"PQ={v['PQ']['mean']:.4f}±{v['PQ']['std']:.4f}  "
-        f"DQ={v['DQ']['mean']:.4f}±{v['DQ']['std']:.4f}  "
-        f"SQ={v['SQ']['mean']:.4f}±{v['SQ']['std']:.4f}"
-    )
-lines.append(sep)
-
-txt_out = os.path.join(summary_dir, '3fold_summary.txt')
-with open(txt_out, 'w') as f:
-    f.write('\n'.join(lines) + '\n')
-
-print('\n'.join(lines))
-print(f'\n[Saved] {json_out}')
-print(f'[Saved] {txt_out}')
+print(f"\nSummary saved to {summary_dir}/")
+for k in keys:
+    print(f"  {k:12s}: {avg[k]:.4f}")
 PYEOF
 
-# ── 总耗时 ────────────────────────────────────────────────────
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
 HOURS=$(( ELAPSED / 3600 ))
@@ -169,8 +168,8 @@ SECS=$(( ELAPSED % 60 ))
 
 echo ""
 echo "=========================================="
-echo "  All3 folds finished"
-echo "  Total time : ${HOURS}h ${MINS}m ${SECS}s"
-echo "  Results: ${SAVE_DIR}/"
-echo "  Summary    : ${SUMMARY_DIR}/3fold_summary.txt"
+echo "  All 3 folds finished"
+echo "  Total time: ${HOURS}h ${MINS}m ${SECS}s"
+echo "  Results   : ${SAVE_DIR}/"
+echo "  Summary   : ${SUMMARY_DIR}/3fold_summary.txt"
 echo "=========================================="

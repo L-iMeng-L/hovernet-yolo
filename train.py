@@ -62,26 +62,41 @@ def train_one_epoch(model, loader, optimizer, scheduler, device, epoch):
         optimizer.zero_grad()
         out = model(imgs)
         
-        loss_np = F.binary_cross_entropy(out['np_map'], np_gt)
-        loss_hv = F.mse_loss(out['hv_map'], hv_gt)
-        
-        mask = nc_gt >= 0
-        if mask.sum() > 0:
-            loss_nc = F.cross_entropy(
-                out['nc_map'].permute(0,2,3,1)[mask],
-                nc_gt[mask],
-                label_smoothing=0.1
-            )
-        else:
-            loss_nc = torch.tensor(0.0, device=device)
-        
+        # NP branch: BCE + Dice
+        loss_np_bce = F.binary_cross_entropy(out['np_map'], np_gt)
         pred_binary = (out['np_map'] > 0.5).float()
         gt_binary = (np_gt > 0.5).float()
         intersection = (pred_binary * gt_binary).sum()
         union = pred_binary.sum() + gt_binary.sum() - intersection
-        iou = intersection / (union + 1e-6)
+        loss_np_dice = 1 - (2 * intersection + 1e-6) / (union + 1e-6)
+        loss_np = loss_np_bce + loss_np_dice
         
-        loss = loss_np + 2.0*loss_hv + 1.5*loss_nc
+        # HV branch: MSE + MSGE (masked MSE)
+        loss_hv_mse = F.mse_loss(out['hv_map'], hv_gt)
+        nuclei_mask = (np_gt > 0.5).float()
+        loss_hv_msge = ((out['hv_map'] - hv_gt) ** 2 * nuclei_mask).sum() / (nuclei_mask.sum() + 1e-8)
+        loss_hv = 2.0 * loss_hv_mse + loss_hv_msge
+        
+        # NC branch: CE + Dice
+        mask = nc_gt >= 0
+        if mask.sum() > 0:
+            loss_nc_ce = F.cross_entropy(
+                out['nc_map'].permute(0,2,3,1)[mask],
+                nc_gt[mask],
+                label_smoothing=0.1
+            )
+            # Dice for classification
+            nc_pred_softmax = F.softmax(out['nc_map'], dim=1)
+            nc_gt_onehot = F.one_hot(nc_gt[mask], num_classes=out['nc_map'].shape[1]).float()
+            nc_pred_flat = nc_pred_softmax.permute(0,2,3,1)[mask]
+            intersection_nc = (nc_pred_flat * nc_gt_onehot).sum()
+            loss_nc_dice = 1 - (2 * intersection_nc + 1e-6) / (nc_pred_flat.sum() + nc_gt_onehot.sum() + 1e-6)
+            loss_nc = loss_nc_ce + loss_nc_dice
+        else:
+            loss_nc = torch.tensor(0.0, device=device)
+        
+        iou = intersection / (union + 1e-6)
+        loss = loss_np + loss_hv + loss_nc
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
@@ -113,26 +128,40 @@ def val_one_epoch(model, loader, device, epoch):
         
         out = model(imgs)
         
-        loss_np = F.binary_cross_entropy(out['np_map'], np_gt)
-        loss_hv = F.mse_loss(out['hv_map'], hv_gt)
-        
-        mask = nc_gt >= 0
-        if mask.sum() > 0:
-            loss_nc = F.cross_entropy(
-                out['nc_map'].permute(0,2,3,1)[mask],
-                nc_gt[mask],
-                label_smoothing=0.1
-            )
-        else:
-            loss_nc = torch.tensor(0.0, device=device)
-        
+        # NP branch: BCE + Dice
+        loss_np_bce = F.binary_cross_entropy(out['np_map'], np_gt)
         pred_binary = (out['np_map'] > 0.5).float()
         gt_binary = (np_gt > 0.5).float()
         intersection = (pred_binary * gt_binary).sum()
         union = pred_binary.sum() + gt_binary.sum() - intersection
-        iou = intersection / (union + 1e-6)
+        loss_np_dice = 1 - (2 * intersection + 1e-6) / (union + 1e-6)
+        loss_np = loss_np_bce + loss_np_dice
         
-        loss = loss_np + 2.0*loss_hv + 1.5*loss_nc
+        # HV branch: MSE + MSGE
+        loss_hv_mse = F.mse_loss(out['hv_map'], hv_gt)
+        nuclei_mask = (np_gt > 0.5).float()
+        loss_hv_msge = ((out['hv_map'] - hv_gt) ** 2 * nuclei_mask).sum() / (nuclei_mask.sum() + 1e-8)
+        loss_hv = 2.0 * loss_hv_mse + loss_hv_msge
+        
+        # NC branch: CE + Dice
+        mask = nc_gt >= 0
+        if mask.sum() > 0:
+            loss_nc_ce = F.cross_entropy(
+                out['nc_map'].permute(0,2,3,1)[mask],
+                nc_gt[mask],
+                label_smoothing=0.1
+            )
+            nc_pred_softmax = F.softmax(out['nc_map'], dim=1)
+            nc_gt_onehot = F.one_hot(nc_gt[mask], num_classes=out['nc_map'].shape[1]).float()
+            nc_pred_flat = nc_pred_softmax.permute(0,2,3,1)[mask]
+            intersection_nc = (nc_pred_flat * nc_gt_onehot).sum()
+            loss_nc_dice = 1 - (2 * intersection_nc + 1e-6) / (nc_pred_flat.sum() + nc_gt_onehot.sum() + 1e-6)
+            loss_nc = loss_nc_ce + loss_nc_dice
+        else:
+            loss_nc = torch.tensor(0.0, device=device)
+        
+        iou = intersection / (union + 1e-6)
+        loss = loss_np + loss_hv + loss_nc
         
         losses['total'].append(loss.item())
         losses['np'].append(loss_np.item())
