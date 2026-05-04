@@ -9,7 +9,7 @@ from skopt.utils import use_named_args
 from models.seg_model import HoverSegModel
 from data.dataset import get_dataloader, collate_fn  
 from utils.post_process import batch_postprocess
-from utils.seg_metrics import batch_seg_metrics
+from utils.metrics import batch_seg_metrics
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
