@@ -12,7 +12,7 @@ import seaborn as sns
 from models.seg_model import HoverSegModel
 from data.dataset import get_dataloader
 from utils.post_process import batch_postprocess
-from utils.metrics import batch_seg_metrics, match_instances, match_instances_classwise
+from utils.metrics import batch_metrics, match_instances, match_instances_classwise
 
 CLASS_NAMES = ['Neoplastic', 'Inflammatory', 'Connective', 'Dead', 'Epithelial']
 
@@ -173,12 +173,11 @@ def evaluate(model, loader, device, args):
         all_true_cls.extend(true_cls_list)
 
     # 全局分割/实例指标
-    metrics = batch_seg_metrics(
+    metrics = batch_metrics(
         all_pred_insts, all_true_insts,
         all_pred_cls, all_true_cls,
         match_iou=args.match_iou,
     )
-
     # 匹配实例上的分类准确率
     true_labels, pred_labels = _collect_matched_pairs(
         all_pred_insts, all_true_insts, all_pred_cls, all_true_cls,

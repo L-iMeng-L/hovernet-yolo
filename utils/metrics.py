@@ -76,8 +76,10 @@ def match_instances(true_inst, pred_inst, match_iou=0.5):
     fn = n_true - tp
     iou_sum = float(matched_ious.sum())
 
-    matched_pairs = [(int(true_ids[t]), int(pred_ids[p]), float(iou_mat[t, p]))
-                     for t, p in zip(ri, ci)]
+    matched_pairs = [
+        (int(true_ids[t]), int(pred_ids[p]), float(iou_mat[t, p]))
+        for t, p in zip(ri, ci)
+    ]
 
     return tp, fp, fn, iou_sum, matched_pairs
 
@@ -131,21 +133,53 @@ def match_instances_classwise(true_inst, pred_inst, true_cls=None, pred_cls=None
     fn = n_true - tp
     iou_sum = float(matched_ious.sum())
 
-    matched_pairs = [(int(true_keep[t]), int(pred_keep[p]), float(iou_mat[t, p]))
-                     for t, p in zip(ri, ci)]
+    matched_pairs = [
+        (int(true_keep[t]), int(pred_keep[p]), float(iou_mat[t, p]))
+        for t, p in zip(ri, ci)
+    ]
 
     return tp, fp, fn, iou_sum, matched_pairs
 
 def _compute_single_sample(args):
     pred, true, p_cls, t_cls, match_iou = args
-    return match_instances(true, pred, match_iou)
+    tp, fp, fn, iou_sum, matched_pairs = match_instances(true, pred, match_iou)
 
-def batch_seg_metrics(pred_inst_list, true_inst_list,
-                      pred_cls_list=None, true_cls_list=None,
-                      match_iou=0.5, num_workers=None):
+    # 样本级 matched-instance 分类准确率
+    cls_acc = np.nan
+    if p_cls is not None and t_cls is not None and len(matched_pairs) > 0:
+        true_labels = []
+        pred_labels = []
+        for t_id, p_id, _ in matched_pairs:
+            t_cls_id = t_cls.get(t_id, None)
+            p_cls_id = p_cls.get(p_id, None)
+            if t_cls_id is None or p_cls_id is None:
+                continue
+            true_labels.append(int(t_cls_id))
+            pred_labels.append(int(p_cls_id))
+
+        if len(true_labels) > 0:
+            true_labels = np.asarray(true_labels, dtype=np.int64)
+            pred_labels = np.asarray(pred_labels, dtype=np.int64)
+            cls_acc = float((true_labels == pred_labels).mean())
+
+    return tp, fp, fn, iou_sum, cls_acc
+
+def batch_metrics(pred_inst_list, true_inst_list,
+                  pred_cls_list=None, true_cls_list=None,
+                  match_iou=0.5, num_workers=None):
     """
-    数据集级别整体指标：累计 TP/FP/FN/IoU_sum 后统一计算
-    这里 cls_acc 返回“全局 matched pairs 上的分类准确率”
+    数据集级别整体指标统计。
+
+    返回字段：
+        TP, FP, FN, IoU_sum
+        PQ, DQ, SQ, F1, Precision, Recall
+        cls_acc:
+            1) 如果提供 pred_cls_list 和 true_cls_list，则统计全局 matched pairs 分类准确率
+            2) 否则返回 NaN
+
+    说明：
+        - 实例匹配基于 IoU + Hungarian assignment
+        - 分类准确率只在 matched instances 上统计
     """
     if num_workers is None:
         num_workers = max(1, mp.cpu_count() - 1)
@@ -174,6 +208,9 @@ def batch_seg_metrics(pred_inst_list, true_inst_list,
     sq = IoU_sum / (TP + 1e-8) if TP > 0 else 0.0
     pq = IoU_sum / (TP + 0.5 * FP + 0.5 * FN + 1e-8)
 
+    cls_acc_vals = [r[4] for r in results if not np.isnan(r[4])]
+    cls_acc = float(np.mean(cls_acc_vals)) if len(cls_acc_vals) > 0 else np.nan
+
     return dict(
         TP=int(TP),
         FP=int(FP),
@@ -185,4 +222,5 @@ def batch_seg_metrics(pred_inst_list, true_inst_list,
         F1=float(f1),
         Precision=float(precision),
         Recall=float(recall),
+        cls_acc=cls_acc,
     )
