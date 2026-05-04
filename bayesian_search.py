@@ -9,7 +9,7 @@ from skopt.utils import use_named_args
 from models.seg_model import HoverSegModel
 from data.dataset import get_dataloader, collate_fn  
 from utils.post_process import batch_postprocess
-from utils.metrics import batch_seg_metrics
+from utils.metrics import batch_metrics
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -48,9 +48,9 @@ def evaluate_params(model, loader, device, params, num_workers=8):
         all_pred_cls.extend(pred_cls_list)
         all_true_cls.extend(true_cls_list)
     
-    return batch_seg_metrics(all_pred_insts, all_true_insts, 
-                            all_pred_cls, all_true_cls, 
-                            match_iou=0.5, num_workers=num_workers)
+    return batch_metrics(all_pred_insts, all_true_insts, 
+                         all_pred_cls, all_true_cls, 
+                         match_iou=0.5, num_workers=num_workers)
 
 def main():
     p = argparse.ArgumentParser()
