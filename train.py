@@ -41,10 +41,10 @@ def get_args():
     p.add_argument('--img_size',    type=int,   default=640)
     p.add_argument('--base_ch',     type=int,   default=64)
     p.add_argument('--num_classes', type=int,   default=5)
-    p.add_argument('--save_dir',    default='./runs')
+    p.add_argument('--save_dir',    default='./runs/second_try')
     p.add_argument('--resume',      default='')
-    p.add_argument('--num_workers', type=int,   default=16)
-    p.add_argument('--patience',    type=int,   default=15)
+    p.add_argument('--num_workers', type=int,   default=32)
+    p.add_argument('--patience',    type=int,   default=20)
     return p.parse_args()
 
 def train_one_epoch(model, loader, optimizer, scheduler, device, epoch):
@@ -118,8 +118,7 @@ def val_one_epoch(model, loader, device, epoch):
     model.eval()
     losses = {'total': [], 'np': [], 'hv': [], 'nc': [], 'iou': []}
     
-    pbar = tqdm(loader, desc=f'Val')
-    for batch in pbar:
+    for batch in tqdm(loader, desc='Val'):
         imgs, _, _, hover_gts = batch
         imgs = imgs.to(device)
         np_gt = hover_gts['np_map'].to(device)
@@ -128,48 +127,43 @@ def val_one_epoch(model, loader, device, epoch):
         
         out = model(imgs)
         
-        # NP branch: BCE + Dice
-        loss_np_bce = F.binary_cross_entropy(out['np_map'], np_gt)
-        pred_binary = (out['np_map'] > 0.5).float()
-        gt_binary = (np_gt > 0.5).float()
-        intersection = (pred_binary * gt_binary).sum()
-        union = pred_binary.sum() + gt_binary.sum() - intersection
-        loss_np_dice = 1 - (2 * intersection + 1e-6) / (union + 1e-6)
+    
+        np_pred = torch.sigmoid(out['np_map'])
+        loss_np_bce = F.binary_cross_entropy_with_logits(out['np_map'], np_gt)
+        pred_flat = (np_pred > 0.5).float().view(-1)
+        gt_flat = (np_gt > 0.5).float().view(-1)
+        intersection = (pred_flat * gt_flat).sum()
+        loss_np_dice = 1 - (2 * intersection + 1) / (pred_flat.sum() + gt_flat.sum() + 1)
         loss_np = loss_np_bce + loss_np_dice
         
-        # HV branch: MSE + MSGE
-        loss_hv_mse = F.mse_loss(out['hv_map'], hv_gt)
         nuclei_mask = (np_gt > 0.5).float()
-        loss_hv_msge = ((out['hv_map'] - hv_gt) ** 2 * nuclei_mask).sum() / (nuclei_mask.sum() + 1e-8)
-        loss_hv = 2.0 * loss_hv_mse + loss_hv_msge
+        mask_sum = nuclei_mask.sum()
+        if mask_sum > 0:
+            loss_hv = F.smooth_l1_loss(
+                out['hv_map'] * nuclei_mask.unsqueeze(1),
+                hv_gt * nuclei_mask.unsqueeze(1),
+                reduction='sum'
+            ) / mask_sum
+        else:
+            loss_hv = torch.tensor(0.0, device=device)
         
-        # NC branch: CE + Dice
         mask = nc_gt >= 0
         if mask.sum() > 0:
-            loss_nc_ce = F.cross_entropy(
+            loss_nc = F.cross_entropy(
                 out['nc_map'].permute(0,2,3,1)[mask],
-                nc_gt[mask],
-                label_smoothing=0.1
+                nc_gt[mask]
             )
-            nc_pred_softmax = F.softmax(out['nc_map'], dim=1)
-            nc_gt_onehot = F.one_hot(nc_gt[mask], num_classes=out['nc_map'].shape[1]).float()
-            nc_pred_flat = nc_pred_softmax.permute(0,2,3,1)[mask]
-            intersection_nc = (nc_pred_flat * nc_gt_onehot).sum()
-            loss_nc_dice = 1 - (2 * intersection_nc + 1e-6) / (nc_pred_flat.sum() + nc_gt_onehot.sum() + 1e-6)
-            loss_nc = loss_nc_ce + loss_nc_dice
         else:
             loss_nc = torch.tensor(0.0, device=device)
         
-        iou = intersection / (union + 1e-6)
         loss = loss_np + loss_hv + loss_nc
         
+        iou = intersection / (pred_flat.sum() + gt_flat.sum() - intersection + 1e-6)
         losses['total'].append(loss.item())
         losses['np'].append(loss_np.item())
         losses['hv'].append(loss_hv.item())
         losses['nc'].append(loss_nc.item())
         losses['iou'].append(iou.item())
-        
-        pbar.set_postfix({'loss': f"{loss.item():.4f}", 'iou': f"{iou.item():.4f}"})
     
     return {k: np.mean(v) for k, v in losses.items()}
 

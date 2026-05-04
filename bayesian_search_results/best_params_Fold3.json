@@ -1,0 +1,10 @@
+{
+  "best_params": {
+    "np_thresh": 0.4,
+    "overall_thresh": 0.7,
+    "ksize": 21,
+    "marker_ksize": 7,
+    "min_area": 9
+  },
+  "best_pq": 0.4763634605840877
+}

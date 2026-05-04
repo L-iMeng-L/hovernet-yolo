@@ -110,12 +110,10 @@ class HoverDecoder(nn.Module):
         self.np_head = nn.Sequential(
             EnhancedHead(b*4, 64, use_attention=False),
             nn.Conv2d(64, 1, 1),
-            nn.Sigmoid()
         )
         self.hv_head = nn.Sequential(
             EnhancedHead(b*4, 64, use_attention=False),
             nn.Conv2d(64, 2, 1),
-            nn.Tanh()
         )
     
     def forward(self, backbone_feats):

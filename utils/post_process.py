@@ -45,7 +45,7 @@ def process_instance(np_map, hv_map, min_area=5, np_thresh=0.5, ksize=21, overal
     marker = remove_small_objects(marker, min_size=min_area)
     
     # 6. 分水岭
-    inst_map = watershed(dist, markers=marker, mask=blb)
+    inst_map = watershed(dist, markers=marker, mask=blb,compactness=0.05)
     
     return inst_map
 

@@ -1,0 +1,16 @@
+Results on Fold1
+============================================================
+  PQ          : 0.4589
+  DQ          : 0.5907
+  SQ          : 0.7535
+  F1          : 0.5907
+  Precision   : 0.5937
+  Recall      : 0.6093
+  cls_acc     : 0.8410
+
+Per-class PQ:
+  Neoplastic    : PQ=0.3684  DQ=0.4639  SQ=0.6626
+  Inflammatory  : PQ=0.2925  DQ=0.3635  SQ=0.4713
+  Connective    : PQ=0.2609  DQ=0.3484  SQ=0.5261
+  Dead          : PQ=0.1286  DQ=0.1827  SQ=0.2855
+  Epithelial    : PQ=0.3314  DQ=0.4311  SQ=0.6191

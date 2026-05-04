@@ -218,7 +218,7 @@ def collate_fn(batch):
 
 def get_dataloader(roots, batch_size=8, shuffle=True,
                    img_size=640, num_classes=5, num_workers=4,
-                   is_train=False):# ← 新增
+                   is_train=False):
     if isinstance(roots, str):
         roots = [roots]
     datasets = [

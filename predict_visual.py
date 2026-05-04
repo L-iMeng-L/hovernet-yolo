@@ -1,6 +1,5 @@
-# predict_visual.py
 """
-可视化预测脚本：展示 原图 | GT掩码 | 预测掩码 | Depth Map(HV能量图)
+可视化预测脚本：展示 原图 | GT掩码 | 预测掩码 | Depth Map(HV能量图) | NP Map(核概率图) | Masked Energy Map(NP过滤后)
 用法：
   python predict_visual.py \
     --ckpt runs/xxx/best.pth \
@@ -23,6 +22,10 @@ import matplotlib.patches as mpatches
 from models.seg_model import HoverSegModel
 from data.dataset import get_dataloader
 from utils.post_process import batch_postprocess
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # ── 类别颜色表（BGR→RGB）────────────────────────────────────
 CLASS_NAMES  = ['Neoplastic', 'Inflammatory', 'Connective', 'Dead', 'Epithelial']
@@ -65,6 +68,43 @@ def _hv_to_depth(hv_map: np.ndarray) -> np.ndarray:
     mag_u8 = (mag * 255).astype(np.uint8)
     depth_bgr = cv2.applyColorMap(mag_u8, cv2.COLORMAP_MAGMA)
     return cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2RGB)
+
+# NP Map 可视化
+def _np_to_color(np_map: np.ndarray) -> np.ndarray:
+    """
+    np_map : (H, W) float [0,1]
+    返回   : (H, W, 3) uint8 RGB 伪彩色概率图
+    """
+    np_map_u8 = (np_map * 255).astype(np.uint8)
+    np_bgr = cv2.applyColorMap(np_map_u8, cv2.COLORMAP_JET) # JET  colormap，蓝→红，直观显示概率
+    return cv2.cvtColor(np_bgr, cv2.COLOR_BGR2RGB)
+
+# NP Threshold 过滤后的 Energy Map 可视化
+
+def _hv_to_masked_energy(hv_map: np.ndarray, np_map: np.ndarray, np_thresh: float) -> np.ndarray:
+    """
+    生成被 NP Threshold 过滤后的 Energy Map
+    Args:
+        hv_map: (H, W, 2) HV 偏移图
+        np_map: (H, W) NP 概率图
+        np_thresh: NP 阈值
+    Returns:
+        (H, W, 3) uint8 RGB 伪彩色图
+    """
+    # 1. 计算 HV 的幅值（原始 Energy Map）
+    mag = np.sqrt(hv_map[..., 0]**2 + hv_map[..., 1]**2)
+    mag = (mag - mag.min()) / (mag.max() - mag.min() + 1e-7)
+    
+    # 2. 用 np_thresh 生成前景 mask
+    foreground_mask = (np_map > np_thresh).astype(np.float32)
+    
+    # 3. 把背景区域的 Energy 置 0（黑色）
+    masked_mag = mag * foreground_mask
+    
+    # 4. 转伪彩色
+    mag_u8 = (masked_mag * 255).astype(np.uint8)
+    energy_bgr = cv2.applyColorMap(mag_u8, cv2.COLORMAP_MAGMA) # 用和 Depth Map 一样的 colormap，方便对比
+    return cv2.cvtColor(energy_bgr, cv2.COLOR_BGR2RGB)
 
 def _blend(img_rgb: np.ndarray, mask_rgb: np.ndarray, alpha=0.5) -> np.ndarray:
     """原图与掩码叠加"""
@@ -115,6 +155,9 @@ def predict_visual(model, loader, device, args):
 
         # HV map numpy  (B,H,W,2)
         hv_np = out['hv_map'].permute(0, 2, 3, 1).cpu().numpy()
+        
+        # NP Map
+        np_np = out['np_map'].squeeze(1).cpu().numpy() # (B, H, W)，去掉 channel 维度
 
         B = imgs.shape[0]
         for b in range(B):
@@ -133,33 +176,58 @@ def predict_visual(model, loader, device, args):
                 true_insts[b].astype(np.int32), (W, H),
                 interpolation=cv2.INTER_NEAREST)
 
-            # 掩码着色
+            # Mask
             pred_mask = _inst_to_color(pred_inst, pred_cls_list[b])
             true_mask = _inst_to_color(true_inst, true_cls_list[b])
 
             # Depth map
             depth_rgb = _hv_to_depth(hv_np[b])                 # (H,W,3)
             depth_rgb = cv2.resize(depth_rgb, (W, H))
+        
+            # NP Map 
+            np_rgb = _np_to_color(np_np[b])                    # (H,W,3)
+            np_rgb = cv2.resize(np_rgb, (W, H))
+            
+    
+            # Masked Energy Map 
+            masked_energy_rgb = _hv_to_masked_energy(hv_np[b], np_np[b], args.np_thresh)
+            masked_energy_rgb = cv2.resize(masked_energy_rgb, (W, H))
 
             # 叠加
             pred_blend = _blend(img_np, pred_mask)
             true_blend = _blend(img_np, true_mask)
 
-            # ── 绘图 ──────────────────────────────────────────
-            fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-            titles = ['Original', 'GT Mask', 'Pred Mask', 'Depth Map (HV)']
-            panels = [img_np, true_blend, pred_blend, depth_rgb]
+            # 绘图
+  
+            fig, axes = plt.subplots(1, 6, figsize=(30, 5))
+    
+            titles = [
+                'Original', 
+                'GT Mask', 
+                'Pred Mask', 
+                'Depth Map (HV)', 
+                'NP Map (Prob)',
+                f'Masked Energy (np_thresh={args.np_thresh})' # 标题里显示当前阈值
+            ]
+            panels = [
+                img_np, 
+                true_blend, 
+                pred_blend, 
+                depth_rgb, 
+                np_rgb,
+                masked_energy_rgb # 新增的面板
+            ]
 
             for ax, title, panel in zip(axes, titles, panels):
                 ax.imshow(panel)
-                ax.set_title(title, fontsize=12)
+                ax.set_title(title, fontsize=11) # 稍微调小字体，避免拥挤
                 ax.axis('off')
 
             # 图例放在最后一列下方
             axes[-1].legend(
                 handles=_legend_patches(),
                 loc='lower right',
-                fontsize=7,
+                fontsize=6, # 稍微调小字体
                 framealpha=0.7,
             )
 
@@ -188,11 +256,11 @@ def get_args():
     p.add_argument('--base_ch',       type=int,   default=64)
     p.add_argument('--num_classes',   type=int,   default=5)
     p.add_argument('--num_workers',   type=int,   default=2)
-    p.add_argument('--np_thresh',     type=float, default=0.1)
-    p.add_argument('--ksize',         type=int,   default=11)
-    p.add_argument('--overall_thresh',type=float, default=0.3)
-    p.add_argument('--marker_ksize',  type=int,   default=3)
-    p.add_argument('--min_area',      type=int,   default=3)
+    p.add_argument('--np_thresh',     type=float, default=0.4)
+    p.add_argument('--ksize',         type=int,   default=25)
+    p.add_argument('--overall_thresh',type=float, default= 0.6)
+    p.add_argument('--marker_ksize',  type=int,   default=5)
+    p.add_argument('--min_area',      type=int,   default=10)
     return p.parse_args()
 
 def main():

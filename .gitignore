@@ -2,6 +2,7 @@
 runs/
 # 忽略所有模型权重文件
 *.pt
+*.pth
 *.onnx
 *.engine
 # 忽略Python缓存
@@ -13,3 +14,5 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+**/*dino*

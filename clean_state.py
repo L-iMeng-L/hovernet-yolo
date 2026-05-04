@@ -2,7 +2,7 @@ import torch
 from collections import OrderedDict
 from models.seg_model import HoverSegModel
 
-checkpoint_path = "/home/lwy/hovernet-yolo/runs/Fold2_Fold3_vs_Fold1/best.pth"
+checkpoint_path = "./hover_unet_weights.pth"
 checkpoint = torch.load(checkpoint_path, map_location="cpu",weights_only=False)
 
 model_state_dict = checkpoint["model_state"]
@@ -13,5 +13,5 @@ for k, v in model_state_dict.items():
     clean_state_dict[name] = v
 
 # 不包含优化器状态、epoch等信息
-torch.save(clean_state_dict, "model_weights_only.pth")
-print("权重文件已保存为 model_weights_only.pth")
+torch.save(clean_state_dict, "hover_unet_weights_only.pth")
+print("权重文件已保存为 hover_unet_weights_only.pth")
