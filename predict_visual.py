@@ -207,7 +207,7 @@ def predict_visual(model, loader, device, args):
                 'Pred Mask', 
                 'Depth Map (HV)', 
                 'NP Map (Prob)',
-                f'Masked Energy (np_thresh={args.np_thresh})' # 标题里显示当前阈值
+                f'Masked Energy (np_thresh={args.np_thresh})' 
             ]
             panels = [
                 img_np, 
@@ -220,14 +220,13 @@ def predict_visual(model, loader, device, args):
 
             for ax, title, panel in zip(axes, titles, panels):
                 ax.imshow(panel)
-                ax.set_title(title, fontsize=11) # 稍微调小字体，避免拥挤
+                ax.set_title(title, fontsize=11) 
                 ax.axis('off')
 
-            # 图例放在最后一列下方
             axes[-1].legend(
                 handles=_legend_patches(),
                 loc='lower right',
-                fontsize=6, # 稍微调小字体
+                fontsize=6, 
                 framealpha=0.7,
             )
 
@@ -256,11 +255,11 @@ def get_args():
     p.add_argument('--base_ch',       type=int,   default=64)
     p.add_argument('--num_classes',   type=int,   default=5)
     p.add_argument('--num_workers',   type=int,   default=2)
-    p.add_argument('--np_thresh',     type=float, default=0.4)
-    p.add_argument('--ksize',         type=int,   default=25)
-    p.add_argument('--overall_thresh',type=float, default= 0.6)
-    p.add_argument('--marker_ksize',  type=int,   default=5)
-    p.add_argument('--min_area',      type=int,   default=10)
+    p.add_argument('--np_thresh',     type=float, default=0.2)
+    p.add_argument('--ksize',         type=int,   default=19)
+    p.add_argument('--overall_thresh',type=float, default= 0.7)
+    p.add_argument('--marker_ksize',  type=int,   default=7)
+    p.add_argument('--min_area',      type=int,   default=2)
     return p.parse_args()
 
 def main():

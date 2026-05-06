@@ -4,72 +4,116 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 
+def plot_train_val(ax, df, train_col, val_col=None, title='', ylabel=None):
+    has_train = train_col in df.columns
+    has_val = val_col is not None and val_col in df.columns
+
+    if has_train:
+        ax.plot(df['epoch'], df[train_col], label='train', linewidth=1.8)
+    if has_val:
+        val_df = df.dropna(subset=[val_col])
+        ax.plot(val_df['epoch'], val_df[val_col], '--', label='val', linewidth=1.8)
+
+    ax.set_title(title, fontsize=11)
+    ax.set_xlabel('epoch')
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+
+def add_best_vlines(axes, df):
+    if 'is_best' not in df.columns:
+        return
+    best_epochs = df.loc[df['is_best'] == 1, 'epoch'].tolist()
+    for ax in axes.flat:
+        for ep in best_epochs:
+            ax.axvline(ep, color='red', alpha=0.12, linewidth=0.9)
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--log_dir', required=True,
-                   help='runs/Fold1_Fold3_vs_Fold2 等save_dir')
-    p.add_argument('--save', default='training_curves.png')
+                   help='runs/Fold1_Fold3_vs_Fold2 等 save_dir')
+    p.add_argument('--save', default='training_curves.png',
+                   help='输出图像文件名或绝对路径')
+    p.add_argument('--dpi', type=int, default=180)
     args = p.parse_args()
 
     csv_path = os.path.join(args.log_dir, 'log.csv')
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"找不到 {csv_path}")
+        raise FileNotFoundError(f'找不到 {csv_path}')
 
-    df  = pd.read_csv(csv_path)
-    val = df.dropna(subset=['val_loss'])
+    df = pd.read_csv(csv_path)
+    if 'epoch' not in df.columns:
+        raise ValueError('log.csv 中缺少 epoch 列')
 
-    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
-    fig.suptitle(os.path.basename(args.log_dir), fontsize=14, y=1.01)
+    # 画图风格
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    fig.suptitle(os.path.basename(os.path.normpath(args.log_dir)), fontsize=15, y=0.98)
 
-    def plot(ax, col_train, col_val=None, title=''):
-        if col_train in df.columns:
-            ax.plot(df['epoch'], df[col_train], label='train')
-        if col_val and col_val in val.columns:
-            ax.plot(val['epoch'], val[col_val], '--', label='val')
-        ax.set_title(title)
-        ax.set_xlabel('epoch')
-        ax.legend(fontsize=8)
-        ax.grid(alpha=0.3)
+    # 1) Total loss
+    plot_train_val(
+        axes[0, 0], df,
+        'train_loss', 'val_loss',
+        title='Total Loss',
+        ylabel='loss'
+    )
 
-    # 行0
-    plot(axes[0, 0], 'train_loss','val_loss',    'Total Loss')
-    plot(axes[0, 1], 'train_loss_np', 'val_loss_np', 'NP Loss')
-    plot(axes[0, 2], 'train_loss_hv', 'val_loss_hv', 'HV Loss')
-    plot(axes[0, 3], 'train_loss_nc', 'val_loss_nc', 'NC Loss')
-    # 行1
-    plot(axes[1, 0], 'train_np_iou','val_np_iou',  'NP IoU')
-    plot(axes[1, 1], 'train_np_iou',  'val_iou',     'IoU (train_np / val)')
+    # 2) NP loss
+    plot_train_val(
+        axes[0, 1], df,
+        'train_loss_np', 'val_loss_np',
+        title='NP Loss',
+        ylabel='loss'
+    )
 
-    # lr单独画
-    axes[1, 2].plot(df['epoch'], df['lr'], color='orange')
-    axes[1, 2].set_title('Learning Rate')
-    axes[1, 2].set_xlabel('epoch')
-    axes[1, 2].grid(alpha=0.3)
+    # 3) HV loss
+    plot_train_val(
+        axes[0, 2], df,
+        'train_loss_hv', 'val_loss_hv',
+        title='HV Loss',
+        ylabel='loss'
+    )
 
-    # loss汇总（train vs val 对比）
-    ax = axes[1, 3]
-    ax.plot(df['epoch'],df['train_loss'], label='train_loss')
-    ax.plot(val['epoch'], val['val_loss'],'--', label='val_loss')
-    ax.set_title('Loss Overview')
+    # 4) NC loss
+    plot_train_val(
+        axes[1, 0], df,
+        'train_loss_nc', 'val_loss_nc',
+        title='NC Loss',
+        ylabel='loss'
+    )
+
+    # 5) NP IoU
+    plot_train_val(
+        axes[1, 1], df,
+        'train_np_iou', 'val_np_iou',
+        title='NP IoU',
+        ylabel='iou'
+    )
+
+    # 6) Learning Rate
+    ax = axes[1, 2]
+    if 'lr_backbone' in df.columns:
+        ax.plot(df['epoch'], df['lr_backbone'], label='backbone_lr', linewidth=1.8)
+    if 'lr_decoder' in df.columns:
+        ax.plot(df['epoch'], df['lr_decoder'], label='decoder_lr', linewidth=1.8)
+    if 'lr' in df.columns:
+        ax.plot(df['epoch'], df['lr'], label='lr', linewidth=1.8)
+
+    ax.set_title('Learning Rate', fontsize=11)
     ax.set_xlabel('epoch')
-    ax.legend(fontsize=8)
+    ax.set_ylabel('lr')
+    ax.set_yscale('log')
     ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
 
-    # best epoch红线
-    if 'is_best' in df.columns:
-        best_epochs = df[df['is_best'] == 1]['epoch']
-        for ax in axes.flat:
-            for ep in best_epochs:
-                ax.axvline(ep, color='red', alpha=0.15, linewidth=0.8)
+    # best epoch 红线
+    add_best_vlines(axes, df)
 
     plt.tight_layout()
     out_path = args.save if os.path.isabs(args.save) else os.path.join(args.log_dir, args.save)
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.savefig(out_path, dpi=args.dpi, bbox_inches='tight')
     print(f"saved → {out_path}")
 
 if __name__ == '__main__':
-    # 使用示例：
-    # python plot_curves.py \
-    #   --log_dir ./runs/Fold1_Fold2_vs_Fold3 \
-    #   --savetraining_curves.png
     main()

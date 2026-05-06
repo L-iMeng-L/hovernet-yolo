@@ -1,4 +1,3 @@
-# aggregate_3fold.py
 import os
 import json
 import argparse
@@ -19,7 +18,6 @@ def main():
     folds = ['Fold1', 'Fold2', 'Fold3']
     all_metrics = {}
 
-    # 读取每折结果
     for fold in folds:
         json_path = os.path.join(args.result_dir, f'metrics_{fold}.json')
         if not os.path.exists(json_path):
@@ -34,36 +32,31 @@ def main():
 
     fold_names = list(all_metrics.keys())
 
-    # 计算均值和标准差
-    metrics_keys = ['PQ', 'DQ', 'SQ', 'F1', 'Precision', 'Recall', 'cls_acc', 'global_cls_acc']
+    metrics_keys = [
+        'PQb', 'DQb', 'SQb', 'Fd',
+        'PQM', 'DQm', 'SQm', 'F1m',
+        'Precision_b', 'Recall_b',
+        'Precision_m', 'Recall_m',
+        'cls_acc'
+    ]
     summary = {}
 
     for key in metrics_keys:
         values = [all_metrics[fold].get(key, np.nan) for fold in fold_names]
         mean, std = safe_mean_std(values)
-        summary[key] = {
-            'mean': mean,
-            'std': std,
-            'values': values
-        }
+        summary[key] = {'mean': mean, 'std': std, 'values': values}
 
-    # Per-class汇总
     per_class_summary = {}
     for cls_name in CLASS_NAMES:
         per_class_summary[cls_name] = {}
         for metric in ['PQ', 'DQ', 'SQ', 'F1', 'Precision', 'Recall']:
-            values = []
-            for fold in fold_names:
-                v = all_metrics[fold].get('per_class', {}).get(cls_name, {}).get(metric, np.nan)
-                values.append(v)
+            values = [
+                all_metrics[fold].get('per_class', {}).get(cls_name, {}).get(metric, np.nan)
+                for fold in fold_names
+            ]
             mean, std = safe_mean_std(values)
-            per_class_summary[cls_name][metric] = {
-                'mean': mean,
-                'std': std,
-                'values': values
-            }
+            per_class_summary[cls_name][metric] = {'mean': mean, 'std': std, 'values': values}
 
-    # 打印和保存
     output_lines = []
     sep = '=' * 70
 
@@ -77,9 +70,7 @@ def main():
     for key in metrics_keys:
         mean = summary[key]['mean']
         std = summary[key]['std']
-        values_str = ', '.join([
-            'nan' if np.isnan(v) else f'{v:.4f}' for v in summary[key]['values']
-        ])
+        values_str = ', '.join(['nan' if np.isnan(v) else f'{v:.4f}' for v in summary[key]['values']])
         output_lines.append(f'  {key:<15}: {mean:.4f} ± {std:.4f}  [{values_str}]')
 
     output_lines.append(f'\nPer-Class Metrics (Mean ± Std):')
@@ -94,17 +85,14 @@ def main():
 
     output_lines.append(sep)
 
-    # 打印到终端
     for line in output_lines:
         print(line)
 
-    # 保存到文件
     with open(args.output, 'w') as f:
         f.write('\n'.join(output_lines))
 
     print(f'\n[Saved] {args.output}')
 
-    # 保存json
     json_output = args.output.replace('.txt', '.json')
     with open(json_output, 'w') as f:
         json.dump({
