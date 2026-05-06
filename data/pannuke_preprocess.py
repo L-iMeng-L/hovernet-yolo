@@ -40,7 +40,6 @@ def get_bounding_box(img):
     cmax += 1
     return [rmin, rmax, cmin, cmax]
 
-
 def cropping_center(x, crop_shape, batch=False):
     """Crop an input image at the centre."""
     orig_shape = x.shape
